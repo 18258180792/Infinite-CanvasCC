@@ -1,0 +1,27 @@
+# Secrets and local configuration
+API/.env
+*.env
+*.env.local
+
+# Local Python/runtime files
+python/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local/generated media and caches
+assets/
+output/
+data/media_previews/
+data/update_backups/
+data/update_staging/
+data/canvases/
+.libtv/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

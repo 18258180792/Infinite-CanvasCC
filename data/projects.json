@@ -1,0 +1,18 @@
+{
+  "projects": [
+    {
+      "id": "default",
+      "name": "默认项目",
+      "order": 0,
+      "created_at": 1787882875686,
+      "updated_at": 1787882875686
+    },
+    {
+      "id": "e1c26f5a4a1641619bb848520880f6df",
+      "name": "杯子",
+      "order": 1,
+      "created_at": 1788269288819,
+      "updated_at": 1788269288819
+    }
+  ]
+}
