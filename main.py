@@ -6297,7 +6297,7 @@ def jimeng_login_text():
     return "\n".join(parts).strip()
 
 def jimeng_login_qr_from_text(text):
-    text = str(text or "")
+    text = str(text or "").replace("\x1b", "")
     candidates = []
     patterns = [
         r"(https?://[^\s\"'<>]+)",
@@ -6307,9 +6307,15 @@ def jimeng_login_qr_from_text(text):
     for pattern in patterns:
         candidates.extend(re.findall(pattern, text))
     for value in candidates:
-        if "login" in value.lower() or "qr" in value.lower() or value.startswith(("data:image", "dreamina://")):
+        value = value.rstrip(".,;:)]}>")
+        lower = value.lower()
+        if value.startswith(("data:image", "dreamina://")):
             return value
-    return candidates[0] if candidates else ""
+        if value.startswith(("http://", "https://")) and any(
+            marker in lower for marker in ("login", "qr", "qrcode", "wechat", "code")
+        ):
+            return value
+    return ""
 
 async def jimeng_login_reader(proc):
     async def read_stream(stream, key):

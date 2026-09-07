@@ -360,6 +360,9 @@ let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
 let linksRenderQueued = false;
+let nodeElementCache = new Map();
+let dragFrameQueued = false;
+let pendingDragEvent = null;
 let zoomPreviewState = null;
 let resizeNode = null;
 let llmPaneDrag = null;
@@ -5962,6 +5965,7 @@ function render(){
     bindCanvasPreviewImageFallbacks(nodesEl);
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
+    nodeElementCache = new Map([...nodesEl.querySelectorAll('.node')].map(el => [el.dataset.id, el]));
     refreshOutputTimer();
 }
 function refreshNodes(ids=[]){
@@ -5993,6 +5997,7 @@ function refreshNodes(ids=[]){
     bindCanvasPreviewImageFallbacks(nodesEl);
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
+    nodeElementCache = new Map([...nodesEl.querySelectorAll('.node')].map(el => [el.dataset.id, el]));
     refreshOutputTimer();
 }
 function refreshRunNodes(node, out=null){
@@ -15096,6 +15101,10 @@ async function importWorkflowFile(file){
 }
 function startNodeDrag(e, node){
     if(e.button !== 0) return;
+    if(!selected.has(node.id) && !e.altKey){
+        startBoardPan(e);
+        return;
+    }
     if(startKnifeDrag(e)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -15131,38 +15140,49 @@ function startNodeDrag(e, node){
     const children = [...collected.values()];
     dragNode = {node: dragTarget, children, sx:e.clientX, sy:e.clientY, ox:dragTarget.x, oy:dragTarget.y};
     document.body.classList.add('canvas-node-drag');
-    window.onmousemove = onNodeDrag;
-    window.onmouseup = endDrag;
+    window.addEventListener('mousemove', onNodeDrag, true);
+    window.addEventListener('mouseup', endDrag, true);
 }
 function onNodeDrag(e){
     if(!dragNode) return;
-    const dx = (e.clientX - dragNode.sx) / viewport.scale;
-    const dy = (e.clientY - dragNode.sy) / viewport.scale;
-    dragNode.node.x = dragNode.ox + dx;
-    dragNode.node.y = dragNode.oy + dy;
-    const el = nodesEl.querySelector(`.node[data-id="${dragNode.node.id}"]`);
-    if(el){
-        el.style.left = `${dragNode.node.x}px`;
-        el.style.top = `${dragNode.node.y}px`;
-    }
-    (dragNode.children || []).forEach(childDrag => {
-        childDrag.node.x = childDrag.ox + dx;
-        childDrag.node.y = childDrag.oy + dy;
-        const childEl = nodesEl.querySelector(`.node[data-id="${childDrag.node.id}"]`);
-        if(childEl){
-            childEl.style.left = `${childDrag.node.x}px`;
-            childEl.style.top = `${childDrag.node.y}px`;
+    pendingDragEvent = e;
+    if(dragFrameQueued) return;
+    dragFrameQueued = true;
+    requestAnimationFrame(() => {
+        dragFrameQueued = false;
+        const event = pendingDragEvent;
+        pendingDragEvent = null;
+        if(!dragNode || !event) return;
+        const dx = (event.clientX - dragNode.sx) / viewport.scale;
+        const dy = (event.clientY - dragNode.sy) / viewport.scale;
+        dragNode.node.x = dragNode.ox + dx;
+        dragNode.node.y = dragNode.oy + dy;
+        const el = nodeElementCache.get(dragNode.node.id) || nodesEl.querySelector(`.node[data-id="${dragNode.node.id}"]`);
+        if(el){
+            nodeElementCache.set(dragNode.node.id, el);
+            el.style.left = `${dragNode.node.x}px`;
+            el.style.top = `${dragNode.node.y}px`;
         }
+        (dragNode.children || []).forEach(childDrag => {
+            childDrag.node.x = childDrag.ox + dx;
+            childDrag.node.y = childDrag.oy + dy;
+            const childEl = nodeElementCache.get(childDrag.node.id) || nodesEl.querySelector(`.node[data-id="${childDrag.node.id}"]`);
+            if(childEl){
+                nodeElementCache.set(childDrag.node.id, childEl);
+                childEl.style.left = `${childDrag.node.x}px`;
+                childEl.style.top = `${childDrag.node.y}px`;
+            }
+        });
+        renderLinks();
+        renderSelectionHub();
+        if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
+        scheduleMinimapRender();
     });
-    scheduleLinksRender();
-    renderSelectionHub();
-    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
-    scheduleMinimapRender();
 }
 function startNodeResize(e, node){
     e.preventDefault();
     e.stopPropagation();
-    const el = nodesEl.querySelector(`.node[data-id="${node.id}"]`);
+    const el = nodeElementCache.get(node.id) || nodesEl.querySelector(`.node[data-id="${node.id}"]`);
     const rect = el?.getBoundingClientRect();
     resizeNode = {
         node,
@@ -15172,8 +15192,8 @@ function startNodeResize(e, node){
         sh:(rect?.height ? rect.height / viewport.scale : node.h || defaultNodeSize(node.type).h || 160)
     };
     document.body.classList.add('canvas-node-resize');
-    window.onmousemove = onNodeResize;
-    window.onmouseup = endDrag;
+    window.addEventListener('mousemove', onNodeResize, true);
+    window.addEventListener('mouseup', endDrag, true);
 }
 function onNodeResize(e){
     if(!resizeNode) return;
@@ -15328,6 +15348,9 @@ function endDrag(event=null){
     if(!event?.shiftKey) setKnifeMode(false);
     if(textSelectionGuard) textSelectionGuard.active = false;
     document.body.classList.remove('canvas-node-drag', 'canvas-node-resize', 'canvas-selecting', 'canvas-board-pan');
+    window.removeEventListener('mousemove', onNodeDrag, true);
+    window.removeEventListener('mousemove', onNodeResize, true);
+    window.removeEventListener('mouseup', endDrag, true);
     window.onmousemove = null;
     window.onmouseup = null;
     if(shouldRenderKnife) render();
@@ -15808,7 +15831,14 @@ board.addEventListener('click', e => {
     if(nodeEl?.dataset?.id) exitZoomPreviewToNode(nodeEl.dataset.id);
     else exitZoomPreview(screenToWorld(e.clientX, e.clientY));
 }, true);
-function startBoardPan(e, opts={}){
+board.addEventListener('mousedown', e => {
+    if(!canvas || e.button !== 0 || zoomPreviewState || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+    const nodeEl = e.target.closest?.('.node');
+    if(!nodeEl) return;
+    const node = nodes.find(item => item.id === nodeEl.dataset.id);
+    if(!node || selected.has(node.id)) return;
+    if(startBoardPan(e, {clearSelectionOnClick:true})) e.stopImmediatePropagation();
+}, true);function startBoardPan(e, opts={}){
     if(!canvas) return false;
     if(isEditableTarget(e.target) || e.target.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap')) return false;
     e.preventDefault();
@@ -15899,6 +15929,11 @@ board.onwheel = e => {
     renderSelectionHub();
     scheduleViewportSave();
 };
+board.addEventListener('wheel', e => {
+    if(typeof board.onwheel !== 'function') return;
+    board.onwheel(e);
+    e.stopImmediatePropagation();
+}, {capture:true, passive:false});
 board.addEventListener('dragover', e => {
     if(e.target.closest?.('.image-node')){
         dropOverlay.classList.remove('active');

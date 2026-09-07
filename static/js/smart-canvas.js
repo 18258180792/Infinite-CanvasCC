@@ -97,6 +97,8 @@ let mentionAnchorEl = null;
 let mentionInsertMode = 'token';
 let panState = null;
 let didPan = false;
+// 画布平移修饰键：按住空格后拖动鼠标左键，可从节点或画布空白处平移。
+let isSpaceKeyDown = false;
 let portDragState = null;
 let connectionEraseState = null;
 let saveTimer = null;
@@ -17473,6 +17475,45 @@ function createNodeFromMenu(type){
     createMenuGroupId = '';
     return created;
 }
+const SMART_CANVAS_PAN_OVERLAY_SELECTOR = '.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.workflow-transfer-panel,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap,.prompt-preset-panel,.prompt-template-panel,.asset-dialog-backdrop';
+const SMART_CANVAS_NODE_CONTROL_SELECTOR = '.node-drop,.mini-x,.smart-node-floating-menu,.node-resize-handle,.thumb-item,.node-port,.prompt-node-control,.prompt-node-pill,select,input,textarea,button,audio,video,.image-name-badge,.image-delete,.smart-group-member-grab';
+const SMART_CANVAS_PAN_HARD_CONTROL_SELECTOR = '.mini-x,.smart-node-floating-menu,.node-resize-handle,.node-port,.prompt-node-control,.prompt-node-pill,select,input,textarea,button,audio,video,[contenteditable="true"],.image-name-badge,.image-delete,.smart-group-member-grab';
+function beginSmartCanvasPan(e, options={}){
+    if(!shell || !e || (e.button !== 0 && e.button !== 1)) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    closeCreateMenu();
+    if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur?.();
+    didPan = false;
+    panState = {
+        button:e.button,
+        startX:e.clientX,
+        startY:e.clientY,
+        ox:viewport.x,
+        oy:viewport.y,
+        fromNode:Boolean(options.fromNode)
+    };
+    shell.classList.add('panning');
+    return true;
+}
+// 画布平移也可以从节点表面开始：未选中的节点保留“点按选中、拖动平移”的直觉，
+// 已选中节点仍用于移动节点；按住空格或使用中键可从任意节点（包括已选中节点）平移。
+shell.addEventListener('mousedown', e => {
+    if(zoomPreviewState || (e.button !== 0 && e.button !== 1)) return;
+    if(e.target.closest?.(SMART_CANVAS_PAN_OVERLAY_SELECTOR)) return;
+    const nodeEl = e.target.closest?.('.image-node');
+    const fromNode = Boolean(nodeEl);
+    const middleButton = e.button === 1;
+    const spacePan = e.button === 0 && isSpaceKeyDown && !isEditableTarget(e.target);
+    const forcePan = middleButton || spacePan;
+    const nodeId = nodeEl?.dataset?.id || '';
+    const unselectedNodePan = e.button === 0 && fromNode && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !isNodeSelected(nodeId);
+    if(!forcePan && !unselectedNodePan) return;
+    // 编辑控件保留原生输入/按钮行为；空格+左键和中键可从节点内容表面平移。
+    if(forcePan && e.target.closest?.(SMART_CANVAS_PAN_HARD_CONTROL_SELECTOR)) return;
+    if(!forcePan && e.target.closest?.(SMART_CANVAS_NODE_CONTROL_SELECTOR)) return;
+    if(beginSmartCanvasPan(e, {fromNode})) e.stopImmediatePropagation();
+}, true);
 shell.addEventListener('mousedown', e => {
     if(!zoomPreviewState) return;
     if(e.button !== 0) return;
@@ -17518,10 +17559,7 @@ shell.onmousedown = e => {
         return;
     }
     if(e.button !== 0 && e.button !== 1) return;
-    e.preventDefault();
-    didPan = false;
-    panState = {button:e.button, startX:e.clientX, startY:e.clientY, ox:viewport.x, oy:viewport.y};
-    shell.classList.add('panning');
+    beginSmartCanvasPan(e);
 };
 shell.oncontextmenu = e => {
     if((e.ctrlKey || e.metaKey) || isRKeyDown){
@@ -17916,8 +17954,11 @@ window.onmouseup = e => {
         thumbDragState = null;
     }
     if(panState) {
+        const moved = didPan;
         panState = null;
         shell.classList.remove('panning');
+        // 节点上的平移手势结束后不要再触发节点点击（否则一次拖动会误选中节点）。
+        if(moved) suppressNodeClickUntil = Date.now() + 180;
         scheduleSave();
         setTimeout(() => { didPan = false; }, 0);
     }
@@ -18100,6 +18141,7 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if((e.code === 'Space' || e.key === ' ') && !isEditableTarget(e.target)) isSpaceKeyDown = true;
     if((e.code === 'Space' || e.key === ' ') && !e.ctrlKey && !e.metaKey && !e.altKey && !isEditableTarget(e.target)){
         const active = selectedNode();
         if(active?.type === 'smart-minimax'){
@@ -18180,9 +18222,11 @@ window.addEventListener('keydown', e => {
     }
 });
 window.addEventListener('keyup', e => {
+    if(e.code === 'Space' || e.key === ' ') isSpaceKeyDown = false;
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
 });
 window.addEventListener('blur', () => {
+    isSpaceKeyDown = false;
     isRKeyDown = false;
 });
 engineSelect.onchange = () => {

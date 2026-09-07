@@ -283,7 +283,7 @@
         "smart.shortcutAssets": { zh: "打开/关闭资源库", en: "Open/close the asset library" },
         "smart.shortcutOverview": { zh: "缩小画布视图", en: "Zoom out to canvas overview" },
         "smart.shortcutCreateMenu": { zh: "打开快捷菜单", en: "Open the quick create menu" },
-        "smart.shortcutPan": { zh: "拖动画布", en: "Drag to pan the canvas" },
+        "smart.shortcutPan": { zh: "拖动画布（选中节点上按住空格，或使用鼠标中键）", en: "Drag to pan (hold Space on a selected node, or use the middle mouse button)" },
         "smart.shortcutZoom": { zh: "缩放画布或预览图片", en: "Zoom canvas or preview image" },
         "smart.shortcutDelete": { zh: "删除选中节点", en: "Delete selected nodes" }
     });
