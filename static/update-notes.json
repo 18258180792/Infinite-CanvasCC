@@ -1,22 +1,14 @@
 {
-  "version": "2026.09.15",
-  "updated_at": "2026-09-15T13:16:53+08:00",
+  "version": "2026.09.15.1",
+  "updated_at": "2026-09-15T13:35:15+08:00",
   "items": [
     {
-      "type": "feature",
-      "text": "新增持久化请求日志、请求 ID 和耗时记录，生图、RunningHub 与 ComfyUI 任务失败后可以更快定位问题。"
+      "type": "fix",
+      "text": "内置更新器的版本检查、更新说明、文件列表和程序下载已全部切换到 18258180792/Infinite-CanvasCC。"
     },
     {
       "type": "fix",
-      "text": "GPT 聊天与 Agent 生图支持 RunningHub、即梦、Codex、Gemini CLI 和火山引擎等协议型线路，避免有效线路被隐藏或静默切换。"
-    },
-    {
-      "type": "fix",
-      "text": "增加对话/生图模型预检和非 JSON 错误解析，网关返回纯文本或 HTML 时也能显示真实错误。"
-    },
-    {
-      "type": "fix",
-      "text": "改进即梦 CLI 登录二维码解析，完整清理 ANSI 控制序列，防止颜色码污染登录链接。"
+      "text": "项目更新不再自动选择或回退到原作者的 ModelScope 镜像，避免后续更新被切回旧上游；ModelScope 生图和聊天能力不受影响。"
     }
   ]
 }
