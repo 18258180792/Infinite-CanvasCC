@@ -18,6 +18,8 @@ import shutil
 import glob
 import asyncio
 import logging
+import contextvars
+import logging.handlers
 import requests
 import zipfile
 import mimetypes
@@ -74,6 +76,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    incoming_id = request.headers.get("X-Request-ID", "")
+    request_id = re.sub(r"[^A-Za-z0-9._-]", "", incoming_id)[:80] or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    token = _request_id.set(request_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        LOG.info("request method=%s path=%s status=%s duration_ms=%.1f", request.method, request.url.path, response.status_code, elapsed_ms)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        _request_id.reset(token)
 
 # --- WebSocket 状态管理器 ---
 class ConnectionManager:
@@ -232,6 +250,8 @@ LOCAL_UPLOAD_DIR = os.path.join(ASSETS_DIR, "uploads")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
 API_ENV_FILE = os.path.join(BASE_DIR, "API", ".env")
 DATA_DIR = os.path.join(BASE_DIR, "data")
+LOG_DIR = os.path.join(DATA_DIR, "logs")
+LOG_FILE = os.path.join(LOG_DIR, "infinite-canvas.log")
 LLM_SKILLS_DIR = os.path.join(DATA_DIR, "llm_skills")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
@@ -247,6 +267,66 @@ LOCAL_IMAGE_IMPORT_MAX_BYTES = int(os.getenv("LOCAL_IMAGE_IMPORT_MAX_BYTES", str
 LOCAL_IMAGE_IMPORT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 RUNNINGHUB_THUMBNAIL_EXTS = (".jpg",)
 STORAGE_SETTINGS_FILE = os.path.join(DATA_DIR, "storage_settings.json")
+
+# 持久化应用日志：控制台适合实时看，文件日志用于重启后追查具体请求和上游错误。
+os.makedirs(LOG_DIR, exist_ok=True)
+APP_LOGGER = logging.getLogger("infinite_canvas")
+APP_LOGGER.setLevel(logging.INFO)
+APP_LOGGER.propagate = False
+if not any(isinstance(handler, logging.handlers.RotatingFileHandler) for handler in APP_LOGGER.handlers):
+    _file_handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"))
+    APP_LOGGER.addHandler(_file_handler)
+_root_file_handler = next(
+    (handler for handler in logging.getLogger().handlers if isinstance(handler, logging.handlers.RotatingFileHandler)),
+    None,
+)
+if _root_file_handler is None:
+    _root_file_handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    _root_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    logging.getLogger().addHandler(_root_file_handler)
+logging.getLogger().setLevel(logging.INFO)
+_request_id = contextvars.ContextVar("request_id", default="-")
+
+class _RequestLogAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        extra = kwargs.setdefault("extra", {})
+        extra.setdefault("request_id", _request_id.get())
+        return msg, kwargs
+
+LOG = _RequestLogAdapter(APP_LOGGER, {})
+
+class _TeeStream:
+    """保留终端输出，同时把旧代码/第三方 CLI 的 print 输出持久化。"""
+    def __init__(self, stream, path):
+        self._stream = stream
+        self._file = open(path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, value):
+        self._stream.write(value)
+        self._file.write(value)
+        return len(value)
+
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+
+    def isatty(self):
+        return self._stream.isatty()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+def install_console_log_capture():
+    console_log = os.path.join(LOG_DIR, "console.log")
+    if not isinstance(sys.stdout, _TeeStream):
+        sys.stdout = _TeeStream(sys.stdout, console_log)
+    if not isinstance(sys.stderr, _TeeStream):
+        sys.stderr = _TeeStream(sys.stderr, console_log)
 DEFAULT_STORAGE_DIRS = {
     "upload": OUTPUT_INPUT_DIR,
     "generated": OUTPUT_OUTPUT_DIR,
@@ -644,10 +724,45 @@ def friendly_validation_error(errors):
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    request_id = getattr(request.state, "request_id", _request_id.get())
+    LOG.warning(
+        "request_validation_failed method=%s path=%s errors=%s",
+        request.method,
+        request.url.path,
+        json.dumps(exc.errors(), ensure_ascii=False, default=str)[:3000],
+    )
     return JSONResponse(
         status_code=422,
-        content={"detail": friendly_validation_error(exc.errors()), "errors": exc.errors()},
+        content={
+            "detail": friendly_validation_error(exc.errors()),
+            "errors": exc.errors(),
+            "request_id": request_id,
+        },
+        headers={"X-Request-ID": request_id},
     )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", _request_id.get())
+    token = _request_id.set(request_id)
+    try:
+        LOG.exception(
+            "unhandled_exception method=%s path=%s exception_type=%s message=%s",
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+            str(exc)[:1000],
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "服务器内部错误，详细信息已写入日志。请提供 request_id 以便定位。",
+                "request_id": request_id,
+            },
+            headers={"X-Request-ID": request_id},
+        )
+    finally:
+        _request_id.reset(token)
 
 def model_list(env_name, primary, defaults):
     configured = os.getenv(env_name, "")
@@ -4060,6 +4175,11 @@ def resolve_chat_provider(provider: str, model: str, ms_model: str):
         raise HTTPException(status_code=400, detail="OpenAI CLI 使用本机 codex 登录态，不需要 API Key。请使用画布/聊天里的 OpenAI CLI 专用通道。")
     if is_gemini_cli_provider(api_provider):
         raise HTTPException(status_code=400, detail="Antigravity CLI 使用本机 agy 登录态，不需要 API Key。请使用画布/聊天里的 Antigravity CLI 专用通道。")
+    if not (api_provider.get("chat_models") or []) and provider_protocol(api_provider) not in {"runninghub"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前平台「{api_provider.get('name') or api_provider.get('id')}」没有可用的聊天模型，请切换到对话线路。",
+        )
     base_root = (api_provider.get("base_url") or AI_BASE_URL).rstrip("/")
     if not base_root:
         raise HTTPException(status_code=400, detail=f"{api_provider.get('name') or api_provider['id']} 未配置 Base URL")
@@ -4105,10 +4225,17 @@ def log_net_error(context, exc, url=""):
             proxies = urllib.request.getproxies() or "无"
         except Exception:
             proxies = "?"
-        print(f"[NET-ERR] {context} | url={url or '?'} | sys_proxy={proxies} | " + " <- ".join(chain), flush=True)
+        LOG.error(
+            "network_error context=%s url=%s sys_proxy=%s chain=%s",
+            context,
+            url or "?",
+            proxies,
+            " <- ".join(chain),
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
     except Exception:
         try:
-            print(f"[NET-ERR] {context} | {type(exc).__name__}: {exc}", flush=True)
+            LOG.error("network_error context=%s exception_type=%s message=%s", context, type(exc).__name__, str(exc)[:1000])
         except Exception:
             pass
 
@@ -6297,7 +6424,10 @@ def jimeng_login_text():
     return "\n".join(parts).strip()
 
 def jimeng_login_qr_from_text(text):
-    text = str(text or "").replace("\x1b", "")
+    text = str(text or "")
+    # CLI QR output may wrap the URL in ANSI CSI color/style sequences. Strip
+    # the full sequence so the terminal reset code cannot leak into the URL.
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text).replace("\x1b", "")
     candidates = []
     patterns = [
         r"(https?://[^\s\"'<>]+)",
@@ -10389,9 +10519,9 @@ def log_runninghub_error(stage, raw=None, **extra):
         payload = {"stage": stage, **{k: v for k, v in extra.items() if v not in (None, "")}}
         if raw is not None:
             payload["raw"] = raw
-        print(f"RunningHub error: {json.dumps(payload, ensure_ascii=False)[:4000]}")
+        LOG.error("runninghub_error %s", json.dumps(payload, ensure_ascii=False, default=str)[:4000])
     except Exception:
-        print(f"RunningHub error: {stage}")
+        LOG.error("runninghub_error stage=%s", stage)
 
 def runninghub_infer_workflow_field_type(field_name, field_value):
     key = f"{field_name or ''} {field_value or ''}".lower()
@@ -11818,17 +11948,27 @@ def chat_split_parallel_prompts(prompt, count):
     return [f"{item}的{suffix}" for item in candidates[:count]]
 
 def pick_chat_image_provider(provider_id="", fallback_id=""):
-    providers = [p for p in load_api_providers() if p.get("enabled", True) and (p.get("image_models") or [])]
+    all_providers = [p for p in load_api_providers() if p.get("enabled", True)]
+    providers = [p for p in all_providers if (p.get("image_models") or []) or provider_protocol(p) in {"runninghub", "jimeng", "codex", "gemini-cli", "volcengine"}]
     for target in (provider_id, fallback_id):
         clean = str(target or "").strip().lower()
         if clean:
+            matched_any = next((p for p in all_providers if p.get("id") == clean), None)
+            if matched_any and matched_any not in providers:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"当前平台「{matched_any.get('name') or clean}」没有可用的生图模型，请切换到生图线路。",
+                )
             matched = next((p for p in providers if p.get("id") == clean), None)
             if matched:
                 return matched
     if providers:
         primary = next((p for p in providers if p.get("primary")), None)
         return primary or providers[0]
-    return get_api_provider(provider_id or fallback_id or "comfly")
+    try:
+        return get_api_provider(provider_id or fallback_id or "comfly")
+    except HTTPException:
+        raise HTTPException(status_code=400, detail="当前没有可用的生图线路，请先在 API 设置中配置生图模型。")
 
 def heuristic_agent_decision(message, refs, has_previous_image):
     text = str(message or "").strip().lower()
@@ -14807,6 +14947,14 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
+        LOG.exception(
+            "canvas_image_task_failed task_id=%s provider=%s model=%s status_code=%s detail=%s",
+            task_id,
+            payload.provider_id,
+            payload.model,
+            status_code,
+            str(detail)[:2000],
+        )
         upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
@@ -14851,6 +14999,12 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     try:
         result = await asyncio.to_thread(generate, payload)
         if isinstance(result, dict) and result.get("error"):
+            LOG.error(
+                "canvas_comfy_task_business_error task_id=%s workflow=%s error=%s",
+                task_id,
+                payload.workflow_json,
+                str(result.get("error"))[:3000],
+            )
             raise RuntimeError(str(result.get("error") or "ComfyUI 生成失败"))
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
@@ -14862,6 +15016,15 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
+        LOG.exception(
+            "canvas_comfy_task_failed task_id=%s workflow=%s status_code=%s detail=%s",
+            task_id,
+            payload.workflow_json,
+            status_code,
+            str(detail)[:2000],
+        )
+        with CANVAS_TASK_LOCK:
+            CANVAS_TASKS[task_id]["request_id"] = _request_id.get()
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
                 "status": "failed",
@@ -17778,6 +17941,11 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
     if payload.mode == "image":
         image_provider_id = payload.provider if payload.provider not in {"modelscope"} else "comfly"
         provider = get_api_provider(image_provider_id)
+        if not (provider.get("image_models") or []) and provider_protocol(provider) not in {"runninghub", "jimeng", "codex", "gemini-cli", "volcengine"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"当前平台「{provider.get('name') or provider.get('id')}」没有可用的生图模型，请切换到生图线路。",
+            )
         default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
         model = selected_model(payload.image_model or payload.model, default_model)
         image_size = chat_prompt_size_override(payload.message, payload.size) or payload.size
@@ -18573,6 +18741,7 @@ def generate(req: GenerateRequest):
     global NEXT_TASK_ID
     current_task = None
     target_backend = None
+    prompt_id = ""
     with QUEUE_LOCK:
         task_id = NEXT_TASK_ID
         NEXT_TASK_ID += 1
@@ -18786,7 +18955,15 @@ def generate(req: GenerateRequest):
         return result
 
     except Exception as e:
-        return {"images": [], "error": str(e)}
+        LOG.exception(
+            "comfy_generate_failed workflow=%s backend=%s task_id=%s prompt_id=%s error=%s",
+            req.workflow_json,
+            target_backend or "",
+            task_id or "",
+            prompt_id or "",
+            str(e)[:2000],
+        )
+        return {"images": [], "error": str(e), "request_id": _request_id.get()}
     finally:
         if target_backend:
             with LOAD_LOCK:
@@ -19447,6 +19624,7 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
 
 if __name__ == "__main__":
     import uvicorn
+    install_console_log_capture()
     # 关闭服务端协议级 WebSocket ping：部分客户端（如 PS UXP 面板）不会自动回 pong，
     # 默认 20s ping/20s 超时会把这些连接每隔一会儿就踢掉造成"频繁断连"。
     # 客户端有自己的应用层心跳 + 断线重连兜底，这里禁用协议 ping 更稳。

@@ -16,15 +16,15 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.08.28.1787893604"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.08.28.1787893602"></script>
-    <script src="/static/js/theme.js?v=2026.08.28.1787893584"></script>
-    <script src="/static/js/i18n.js?v=2026.08.28.1788741682"></script>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.08.28.1787893558">
-    <link rel="stylesheet" href="/static/css/llm-skills.css?v=2026.08.28.1787896564">
-    <script src="/static/js/llm-skills.js?v=2026.08.28.1787897226"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.09.15.1789448978"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.09.15.1789448978"></script>
+    <script src="/static/js/theme.js?v=2026.09.15.1789448978"></script>
+    <script src="/static/js/i18n.js?v=2026.09.15.1789448978"></script>
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.09.15.1789448978">
+    <link rel="stylesheet" href="/static/css/llm-skills.css?v=2026.09.15.1789448978">
+    <script src="/static/js/llm-skills.js?v=2026.09.15.1789448978"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.08.28.1787893590');
+        @import url('/static/vendor/css/fonts.css?v=2026.09.15.1789448978');
         :root {
             --ease:cubic-bezier(.4,0,.2,1);
             --chat-bg:#eef2f6;
@@ -659,6 +659,23 @@
             return value && typeof value === 'object' && !Array.isArray(value);
         }
 
+        // Gateways may return plain text or HTML for an error; preserve that
+        // message instead of throwing a secondary JSON parsing error.
+        async function responseErrorMessage(response, fallback){
+            let raw = '';
+            try { raw = await response.text(); } catch(e) {}
+            if(raw){
+                try {
+                    const parsed = JSON.parse(raw);
+                    const detail = parsed?.detail || parsed?.error?.message || parsed?.message;
+                    if(detail) return String(detail);
+                } catch(e) {}
+                const compact = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+                if(compact) return compact.slice(0, 800);
+            }
+            return fallback;
+        }
+
         const savedChatSettings = readChatSettings();
         let conversations = [];
         let currentConversation = null;
@@ -791,8 +808,14 @@
             return list.length ? list : [{id:'comfly', name:'API', chat_models:[config.chat_model || 'gpt-4o-mini'], image_models:[config.image_model || 'gpt-image-2']}];
         }
         function imageProviders(){
-            const list = (apiProviders || []).filter(p => p.enabled !== false && (p.image_models || []).length);
+            const list = (apiProviders || []).filter(p => p.enabled !== false && ((p.image_models || []).length || ['runninghub','jimeng','codex','gemini-cli','volcengine'].includes(String(p.protocol || '').toLowerCase())));
             return list.length ? list : [{id:'comfly', name:'API', image_models:[config.image_model || 'gpt-image-2'], chat_models:[config.chat_model || 'gpt-4o-mini']}];
+        }
+        function selectedProviderHasModels(kind){
+            const item = providerById(kind === 'image' ? activeImageProvider : provider, kind);
+            if(!item) return false;
+            if(kind === 'image') return (item.image_models || []).length || ['runninghub','jimeng','codex','gemini-cli','volcengine'].includes(String(item.protocol || '').toLowerCase());
+            return (item.chat_models || []).length || ['runninghub','codex','gemini-cli'].includes(String(item.protocol || '').toLowerCase());
         }
         function providerById(id, kind='chat'){
             const list = kind === 'image' ? imageProviders() : chatProviders();
@@ -934,9 +957,8 @@
             const viewportW = (window.visualViewport?.width || window.innerWidth);
             const viewportH = (window.visualViewport?.height || window.innerHeight);
             const width = Math.min(380, Math.max(300, viewportW - 32));
-            const estimatedHeight = Math.min(390, Math.max(260, viewportH * .62));
-            const availableAbove = Math.max(180, rect.top - 14);
-            const maxHeight = Math.min(390, availableAbove, viewportH - 32);
+            const availableAbove = Math.max(0, rect.top - 12 - 10);
+            const maxHeight = Math.min(390, Math.max(180, availableAbove), viewportH - 24);
             const left = Math.min(Math.max(16, rect.left), Math.max(16, viewportW - width - 16));
             const top = Math.max(12, rect.top - maxHeight - 10);
             pop.style.setProperty('--model-picker-left', `${Math.round(left)}px`);
@@ -946,8 +968,10 @@
             requestAnimationFrame(() => {
                 const box = pop.getBoundingClientRect();
                 const nextLeft = box.right > viewportW - 12 ? (left - (box.right - viewportW + 12)) : left;
-                const overlap = box.bottom - (rect.top - 8);
-                const nextTop = overlap > 0 ? (top - overlap - 2) : top;
+                const actualHeight = Math.ceil(box.height || pop.scrollHeight || 160);
+                const nextTop = rect.top - actualHeight - 10 >= 12
+                    ? rect.top - actualHeight - 10
+                    : Math.min(viewportH - actualHeight - 12, rect.bottom + 10);
                 pop.style.setProperty('--model-picker-left', `${Math.round(Math.max(12, nextLeft))}px`);
                 pop.style.setProperty('--model-picker-top', `${Math.round(Math.max(12, nextTop))}px`);
             });
@@ -1468,7 +1492,7 @@
             const form = new FormData();
             [...files].slice(0, available).forEach(file => form.append('files', file));
             try {
-                const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || '上传失败'); return r.json(); });
+                const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, '上传失败')); return r.json(); });
                 refs.push(...(data.files || []));
                 renderRefs();
             } catch(e) {
@@ -1542,6 +1566,8 @@
             if(useStreaming || mode === 'agent') assistantBubble.bubble.classList.add('streaming');
             scrollBottom();
             try {
+                if((mode === 'chat' || mode === 'agent') && !selectedProviderHasModels('chat')) throw new Error('当前对话线路没有可用的聊天模型，请先切换对话线路。');
+                if(mode === 'image' && !selectedProviderHasModels('image')) throw new Error('当前生图线路没有可用的生图模型，请先切换生图线路。');
                 const requestResolution = chatResolutionForRequest(message, requestedSize);
                 const requestAspectRatio = currentChatAspectRatio();
                 if(useStreaming) {
@@ -1564,7 +1590,7 @@
                             reference_images: pendingRefs,
                             provider,
                         })
-                    }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || tr('chat.requestFailed')); return r.json(); });
+                    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('chat.requestFailed'))); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
                     setChatTitle(currentConversation.title);
@@ -1590,7 +1616,7 @@
                             provider,
                             image_provider: activeImageProvider,
                         })
-                    }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || tr('chat.requestFailed')); return r.json(); });
+                    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('chat.requestFailed'))); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
                     setChatTitle(currentConversation.title);
@@ -1614,7 +1640,7 @@
                             reference_images: pendingRefs,
                             provider: activeImageProvider,
                         })
-                    }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || tr('chat.requestFailed')); return r.json(); });
+                    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('chat.requestFailed'))); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
                     setChatTitle(currentConversation.title);
@@ -1649,7 +1675,7 @@
                     reference_images: pendingRefs
                 })
             });
-            if(!res.ok) throw new Error((await res.json()).detail || tr('chat.requestFailed'));
+            if(!res.ok) throw new Error(await responseErrorMessage(res, tr('chat.requestFailed')));
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
