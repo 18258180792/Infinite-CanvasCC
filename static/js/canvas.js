@@ -49,10 +49,16 @@ function canvasDisplayMediaUrl(url, name=''){
     const raw = canvasOriginalMediaUrl(url);
     return /^https?:\/\//i.test(raw) ? canvasProxiedMediaUrl(raw, name) : raw;
 }
+function canvasDirectFirstImageUrl(url, name=''){
+    const raw = canvasOriginalMediaUrl(url);
+    return /^https?:\/\//i.test(raw) ? raw : canvasDisplayMediaUrl(raw, name);
+}
 function canvasMediaPreviewUrl(url, size=512){
     const raw = canvasOriginalMediaUrl(url);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return canvasDisplayMediaUrl(raw);
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')){
+        return isVideoUrl(raw) ? canvasDisplayMediaUrl(raw) : canvasDirectFirstImageUrl(raw);
+    }
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv|flv)(\?|#|$)/i.test(raw)) return raw;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
@@ -131,6 +137,14 @@ function bindCanvasPreviewImageFallbacks(root=document){
                 img.replaceWith(video.content.firstElementChild);
                 return;
             }
+            if(/^https?:\/\//i.test(original)){
+                if(img.dataset.proxyFallbackAttempted === '1') return;
+                img.dataset.proxyFallbackAttempted = '1';
+                img.src = img.getAttribute('src') === original
+                    ? canvasProxiedMediaUrl(original)
+                    : original;
+                return;
+            }
             if(original && img.getAttribute('src') !== original) img.src = original;
         });
     });
@@ -185,7 +199,7 @@ function syncCanvasSelectedImageResolution(root=nodesEl){
             if(preview && img.getAttribute('src') !== preview) img.src = preview;
             return;
         }
-        const target = canvasDisplayMediaUrl(original);
+        const target = canvasDirectFirstImageUrl(original);
         if(!target) return;
         img.dataset.selectedHighResTarget = target;
         if(canvasSelectedHighResLoaded.has(target)){
@@ -11570,6 +11584,7 @@ async function runGeneratorLegacy(genId, opts={}){
     try {
         const payload = {
             prompt: prompt || 'Edit the reference images.',
+            canvas_id:String(canvas?.id || ''),
             provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
             model:resolveImageModel(gen.model),
             size:requestSize,
@@ -13565,10 +13580,11 @@ function findPendingTask(taskId){
     return null;
 }
 async function createCanvasImageTask(payload, options={}){
+    const requestPayload = {...payload, canvas_id:String(payload.canvas_id || canvas?.id || '')};
     const res = await cascadeFetch('/api/canvas-image-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
+        body:JSON.stringify(requestPayload)
     }, options);
     if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
     return res.json();

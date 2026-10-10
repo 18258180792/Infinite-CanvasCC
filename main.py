@@ -20,6 +20,7 @@ import asyncio
 import logging
 import contextvars
 import logging.handlers
+LOG = logging.getLogger("infinite_canvas")
 import requests
 import zipfile
 import mimetypes
@@ -2780,6 +2781,7 @@ class AIReference(BaseModel):
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
+    canvas_id: str = ""
     provider_id: str = "comfly"
     model: str = ""
     size: str = "1024x1024"
@@ -4880,6 +4882,39 @@ def apimart_gemini_uses_generations(provider, model=""):
     host (and other providers that explicitly select the Gemini protocol).
     """
     return is_comfly_image_api_provider(provider) and str(model or "").strip().lower().startswith("gemini-")
+def is_comfly_seedream_async_provider(provider, model=""):
+    """Apply the documented async contract only to Comfly's Seedream model."""
+    if str(model or "").strip() != "seedream-v5-pro":
+        return False
+    parsed = urllib.parse.urlsplit(str((provider or {}).get("base_url") or "").strip())
+    if parsed.scheme not in {"http", "https"} or parsed.hostname != "ai.comfly.org":
+        return False
+    if effective_protocol(provider, model) != "openai":
+        return False
+    configured_mode = str((provider or {}).get("image_request_mode") or "").strip().lower()
+    if configured_mode and configured_mode not in {"openai", "openai-json"}:
+        return False
+    if effective_image_request_mode(provider, model) not in {"openai", "openai-json"}:
+        return False
+    endpoint = urllib.parse.urlsplit(provider_endpoint_url(provider, "image_generation_endpoint", "/v1/images/generations"))
+    return (
+        endpoint.scheme == parsed.scheme and endpoint.netloc == parsed.netloc
+        and endpoint.path == "/v1/images/generations" and not endpoint.query and not endpoint.fragment
+    )
+
+def extract_comfly_image_task_id(payload):
+    if not isinstance(payload, dict):
+        return None
+    task_id = extract_task_id(payload)
+    if not task_id and str(payload.get("code") or "").lower() == "success":
+        task_id = payload.get("data")
+    if isinstance(task_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{5,199}", task_id):
+        return task_id
+    return None
+
+def validate_comfly_image_response(payload):
+    if isinstance(payload, dict) and payload.get("code") and str(payload["code"]).strip().lower() != "success":
+        raise HTTPException(status_code=502, detail=f"Comfly 返回错误：{str(payload.get('message') or payload['code'])[:500]}")
 
 def detect_image_request_mode(base_url="", models=None):
     base = str(base_url or "").strip().lower()
@@ -6991,6 +7026,33 @@ async def httpx_request_with_transient_retries(client, method, url, attempts=2, 
         raise last_exc
     raise httpx.HTTPError(f"请求失败：{method} {url}")
 
+def requests_get_with_transient_retries(url, attempts=3, retry_delay=0.35, **kwargs):
+    attempts = max(1, int(attempts or 1))
+    retry_statuses = {502, 503, 504, 520, 522, 524}
+    host = urllib.parse.urlparse(str(url or "")).hostname or "unknown"
+    for attempt in range(attempts):
+        try:
+            response = requests.get(url, **kwargs)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt + 1 >= attempts:
+                raise
+            LOG.warning(
+                "remote_media_retry host=%s attempt=%s/%s error_type=%s",
+                host, attempt + 2, attempts, type(exc).__name__,
+            )
+            time.sleep(retry_delay * (attempt + 1))
+            continue
+        if response.status_code in retry_statuses and attempt + 1 < attempts:
+            LOG.warning(
+                "remote_media_retry host=%s attempt=%s/%s upstream_status=%s",
+                host, attempt + 2, attempts, response.status_code,
+            )
+            response.close()
+            time.sleep(retry_delay * (attempt + 1))
+            continue
+        return response
+    raise requests.RequestException(f"请求失败：GET {host}")
+
 async def fetch_image_task_payload(client, task_id, provider=None):
     task_url = image_task_url_for_provider(provider, task_id)
     response = await httpx_request_with_transient_retries(
@@ -7003,7 +7065,7 @@ async def fetch_image_task_payload(client, task_id, provider=None):
     response.raise_for_status()
     return response.json()
 
-async def wait_for_image_task(client, task_id, provider=None):
+async def wait_for_image_task(client, task_id, provider=None, response_validator=None):
     is_apimart = is_apimart_provider(provider)
     is_tudou_async = is_tudou_async_image_mode(provider)
     timeout = TUDOU_ASYNC_IMAGE_TASK_TIMEOUT if is_tudou_async else APIMART_IMAGE_TASK_TIMEOUT if is_apimart else IMAGE_TASK_TIMEOUT
@@ -7018,6 +7080,8 @@ async def wait_for_image_task(client, task_id, provider=None):
             if time.monotonic() >= deadline:
                 break
         last_payload = await fetch_image_task_payload(client, task_id, provider)
+        if response_validator:
+            response_validator(last_payload)
         status = image_task_status(last_payload)
         if not status:
             try:
@@ -7354,6 +7418,223 @@ def filename_from_media_url(url: str, fallback: str = "download.bin") -> str:
     path = urllib.parse.urlsplit(str(url or "")).path
     name = os.path.basename(urllib.parse.unquote(path))
     return sanitize_export_filename(name or fallback, fallback)
+
+REMOTE_IMAGE_CACHE_MIME_EXTS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/avif": ".avif",
+}
+REMOTE_IMAGE_CACHE_EXTS = tuple(REMOTE_IMAGE_CACHE_MIME_EXTS.values())
+REMOTE_IMAGE_CACHE_MAX_BYTES = 1024 * 1024 * 1024
+REMOTE_INLINE_IMAGE_TIMEOUT = (5, 15)
+REMOTE_INLINE_IMAGE_BODY_BUDGET = 30.0
+REMOTE_IMAGE_BACKGROUND_TASKS = {}
+REMOTE_IMAGE_BACKGROUND_CONCURRENCY = 3
+REMOTE_IMAGE_BACKGROUND_MAX_PENDING = 32
+REMOTE_IMAGE_BACKGROUND_LIMITER = None
+REMOTE_IMAGE_BACKGROUND_LOOP = None
+
+def remote_image_content_type(path: str):
+    ext = os.path.splitext(path)[1].lower()
+    return next(
+        (mime for mime, cached_ext in REMOTE_IMAGE_CACHE_MIME_EXTS.items() if cached_ext == ext),
+        content_type_for_path(path),
+    )
+
+def remote_image_cache_location(url: str):
+    key = hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()
+    root = os.path.join(MEDIA_PREVIEW_DIR, "remote-images")
+    for ext in REMOTE_IMAGE_CACHE_EXTS:
+        path = os.path.join(root, f"{key}{ext}")
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return root, key, path
+    return root, key, ""
+
+def prune_remote_image_cache(cache_root: str, keep_path: str):
+    try:
+        files = [
+            entry for entry in os.scandir(cache_root)
+            if entry.is_file() and entry.name.endswith(REMOTE_IMAGE_CACHE_EXTS)
+        ]
+        total_bytes = sum(entry.stat().st_size for entry in files)
+        if total_bytes <= REMOTE_IMAGE_CACHE_MAX_BYTES:
+            return
+        for entry in sorted(files, key=lambda item: item.stat().st_mtime):
+            if os.path.abspath(entry.path) == os.path.abspath(keep_path):
+                continue
+            try:
+                size = entry.stat().st_size
+                os.remove(entry.path)
+                total_bytes -= size
+            except OSError:
+                continue
+            if total_bytes <= REMOTE_IMAGE_CACHE_MAX_BYTES:
+                break
+    except OSError:
+        pass
+
+def cache_remote_inline_image(url: str, response, headers: dict, timeout=REMOTE_INLINE_IMAGE_TIMEOUT, verify_image=False):
+    """Read an inline image fully before responding so body timeouts can be retried safely."""
+    cache_root, key, cached_path = remote_image_cache_location(url)
+    if cached_path and verify_image:
+        try:
+            with Image.open(cached_path) as image:
+                image.verify()
+        except Exception:
+            os.remove(cached_path)
+            cached_path = ""
+    if cached_path:
+        response.close()
+        return cached_path, remote_image_content_type(cached_path)
+
+    current = response
+    last_error = None
+    deadline = time.monotonic() + REMOTE_INLINE_IMAGE_BODY_BUDGET
+
+    def remaining_budget():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise requests.Timeout("Remote image download exceeded its time budget")
+        return remaining
+
+    os.makedirs(cache_root, exist_ok=True)
+    for attempt in range(2):
+        temp_path = ""
+        try:
+            remaining = remaining_budget()
+            if attempt:
+                retry_timeout = tuple(min(value, remaining) for value in timeout) if isinstance(timeout, tuple) else min(timeout, remaining)
+                current = requests.get(url, stream=True, timeout=retry_timeout, headers=headers)
+            remaining_budget()
+            current.raise_for_status()
+            content_type = (current.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            ext = REMOTE_IMAGE_CACHE_MIME_EXTS.get(content_type)
+            if not ext:
+                return None
+            cached_path = os.path.join(cache_root, f"{key}{ext}")
+            temp_path = f"{cached_path}.{uuid.uuid4().hex}.tmp"
+            total = 0
+            with open(temp_path, "wb") as output:
+                chunks = iter(current.iter_content(chunk_size=16 * 1024))
+                while True:
+                    remaining_budget()
+                    try:
+                        chunk = next(chunks)
+                    except StopIteration:
+                        break
+                    remaining_budget()
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > 200 * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail="图片超过下载大小限制")
+                    output.write(chunk)
+            if not total:
+                raise requests.RequestException("上游返回了空图片")
+            content_length = current.headers.get("content-length", "")
+            content_encoding = current.headers.get("content-encoding", "").strip().lower()
+            if content_length.isdigit() and content_encoding in ("", "identity") and total != int(content_length):
+                raise requests.RequestException("上游图片下载不完整")
+            if verify_image:
+                try:
+                    with Image.open(temp_path) as image:
+                        image.verify()
+                except Exception as exc:
+                    raise requests.RequestException("上游返回的文件不是完整图片") from exc
+            remaining_budget()
+            os.replace(temp_path, cached_path)
+            prune_remote_image_cache(cache_root, cached_path)
+            return cached_path, content_type
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt + 1 >= 2 or time.monotonic() >= deadline:
+                raise
+            LOG.warning(
+                "remote_inline_image_retry host=%s attempt=%s/2 error_type=%s",
+                urllib.parse.urlparse(url).hostname or "unknown",
+                attempt + 2,
+                type(exc).__name__,
+            )
+        finally:
+            if current is not None:
+                current.close()
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+    if last_error:
+        raise last_error
+    return None
+
+def persist_remote_generated_image(url: str):
+    _root, _key, cached_path = remote_image_cache_location(url)
+    if cached_path:
+        try:
+            with Image.open(cached_path) as image:
+                image.verify()
+            return cached_path
+        except Exception:
+            os.remove(cached_path)
+    headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0", "Accept-Encoding": "identity"}
+    response = requests_get_with_transient_retries(
+        url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT,
+        attempts=2, retry_delay=0.35, headers=headers,
+    )
+    result = cache_remote_inline_image(url, response, headers, verify_image=True)
+    if not result:
+        raise requests.RequestException("上游未返回图片类型")
+    return result[0]
+
+def schedule_remote_generated_image_cache(url: str):
+    global REMOTE_IMAGE_BACKGROUND_LIMITER, REMOTE_IMAGE_BACKGROUND_LOOP
+    if url in REMOTE_IMAGE_BACKGROUND_TASKS:
+        return REMOTE_IMAGE_BACKGROUND_TASKS[url]
+    if len(REMOTE_IMAGE_BACKGROUND_TASKS) >= REMOTE_IMAGE_BACKGROUND_MAX_PENDING:
+        LOG.warning(
+            "generated_image_background_cache_skipped host=%s source=%s reason=queue_full",
+            urllib.parse.urlparse(url).hostname or "unknown",
+            filename_from_media_url(url, "unknown"),
+        )
+        return None
+    loop = asyncio.get_running_loop()
+    if REMOTE_IMAGE_BACKGROUND_LOOP is not loop:
+        REMOTE_IMAGE_BACKGROUND_LOOP = loop
+        REMOTE_IMAGE_BACKGROUND_LIMITER = asyncio.Semaphore(REMOTE_IMAGE_BACKGROUND_CONCURRENCY)
+    limiter = REMOTE_IMAGE_BACKGROUND_LIMITER
+
+    async def persist():
+        started = time.monotonic()
+        try:
+            async with limiter:
+                path = await asyncio.to_thread(persist_remote_generated_image, url)
+            LOG.info(
+                "generated_image_background_cached host=%s source=%s duration_ms=%.1f cache=%s",
+                urllib.parse.urlparse(url).hostname or "unknown",
+                filename_from_media_url(url, "unknown"),
+                (time.monotonic() - started) * 1000,
+                os.path.basename(path),
+            )
+        except Exception as exc:
+            LOG.warning(
+                "generated_image_background_cache_failed host=%s source=%s error_type=%s",
+                urllib.parse.urlparse(url).hostname or "unknown",
+                filename_from_media_url(url, "unknown"),
+                type(exc).__name__,
+            )
+
+    task = asyncio.create_task(persist())
+    REMOTE_IMAGE_BACKGROUND_TASKS[url] = task
+
+    def cleanup(completed):
+        if REMOTE_IMAGE_BACKGROUND_TASKS.get(url) is completed:
+            REMOTE_IMAGE_BACKGROUND_TASKS.pop(url, None)
+
+    task.add_done_callback(cleanup)
+    return task
 
 def fetch_remote_media_bytes(url: str, timeout: float = 30.0, max_bytes: int = 200 * 1024 * 1024):
     text = rewrite_runninghub_file_url(str(url or "").strip())
@@ -9602,8 +9883,49 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
 async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
-async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
-    filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
+def populate_image_canvas_context(payload, request):
+    if payload.canvas_id:
+        return
+    referer = urllib.parse.urlsplit(request.headers.get("referer", ""))
+    origin = urllib.parse.urlsplit(str(request.base_url))
+    if (referer.scheme, referer.netloc) != (origin.scheme, origin.netloc):
+        return
+    if referer.path not in ("/static/canvas.html", "/static/smart-canvas.html"):
+        return
+    canvas_id = urllib.parse.parse_qs(referer.query).get("id", [""])[0]
+    if re.fullmatch(r"[a-zA-Z0-9_-]{1,120}", canvas_id):
+        payload.canvas_id = canvas_id
+
+
+def generated_image_project_name(canvas_id):
+    if not str(canvas_id or "").strip():
+        return "未命名项目"
+    try:
+        canvas = load_canvas(str(canvas_id).strip())
+        project_id = canvas.get("project") or DEFAULT_PROJECT_ID
+        project = next((item for item in load_projects() if item.get("id") == project_id), None)
+        if project and str(project.get("name") or "").strip():
+            return str(project["name"]).strip()
+        return str(canvas.get("title") or "").strip() or "未命名项目"
+    except (HTTPException, OSError, ValueError):
+        return "未命名项目"
+
+
+def generated_image_name_stem(project_name, prompt, index=1):
+    def clean_component(value, fallback, limit):
+        value = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]+', " ", str(value or ""))
+        value = re.sub(r"\s+", " ", value).strip(" ._")[:limit].rstrip(" ._")
+        return value or fallback
+
+    project = clean_component(project_name, "未命名项目", 30)
+    summary = clean_component(prompt, "生成图片", 40)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    return f"{project}_{summary}_{timestamp}_{max(1, int(index)):02d}_{uuid.uuid4().hex[:6]}"
+
+
+async def save_ai_image_to_output(image_data, prefix="online_", category="output", name_stem=""):
+    stem = sanitize_export_filename(name_stem, "") if name_stem else ""
+    filename = f"{stem or (prefix + uuid.uuid4().hex[:10])}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
         mime_type = str(image_data.get("mime_type") or "").lower()
@@ -9621,10 +9943,18 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
         return value
     value = rewrite_runninghub_file_url(value)
     try:
-        timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
+        timeout = httpx.Timeout(connect=4.0, read=6.0, write=8.0, pool=4.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(value)
+            response = await asyncio.wait_for(
+                httpx_request_with_transient_retries(
+                    client, "GET", value, attempts=2, retry_delay=0.35
+                ),
+                timeout=8.0,
+            )
             response.raise_for_status()
+            if not response.content:
+                schedule_remote_generated_image_cache(value)
+                return value
             content_type = response.headers.get("Content-Type", "")
             if "jpeg" in content_type or "jpg" in content_type:
                 filename = filename[:-4] + ".jpg"
@@ -9637,6 +9967,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             return output_url_for(filename, category)
     except Exception as e:
         print(f"保存上游图片失败: {e}; url={value}")
+        schedule_remote_generated_image_cache(value)
         return value
 
 def image_output_meta(url, source_item=None):
@@ -11506,7 +11837,12 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
+    comfly_async = is_comfly_seedream_async_provider(provider, model)
+    if comfly_async and mask_refs:
+        raise HTTPException(status_code=400, detail="Comfly seedream-v5-pro 的 JSON 接口未声明 mask 支持，已停止提交，避免忽略局部编辑范围。")
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
+    if comfly_async:
+        request_timeout = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=15.0)
     async with httpx.AsyncClient(timeout=request_timeout) as client:
         response = None
         async def post_openai_edits(edit_files=None):
@@ -11520,7 +11856,19 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 files=edit_files if edit_files is not None else {},
             )
 
-        if image_request_mode == "openai-video-proxy":
+        if comfly_async:
+            body = {"model": model, "prompt": prompt, "size": size, "response_format": "url"}
+            if image_refs:
+                body["image"] = [reference_to_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
+            try:
+                # A failed submission may already be billed; only GET polling is retried.
+                response = await client.post(
+                    gen_url, params={"async": "true"},
+                    headers=api_headers(provider=provider, model=model), json=body,
+                )
+            except httpx.HTTPError as exc:
+                raise HTTPException(status_code=502, detail="Comfly 异步提交连接异常，无法确认上游是否已受理；未自动重复提交，请先检查供应商任务记录。") from exc
+        elif image_request_mode == "openai-video-proxy":
             body = {
                 "model": model,
                 "prompt": prompt,
@@ -11680,6 +12028,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 response = await post_openai_edits()
         response.raise_for_status()
         raw = response.json()
+        if comfly_async:
+            validate_comfly_image_response(raw)
         try:
             return extract_image(raw), raw
         except HTTPException as exc:
@@ -11692,15 +12042,28 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 except Exception:
                     pass
                 raise HTTPException(status_code=502, detail=responses_no_image_detail(raw) or exc.detail)
-            task_id = extract_task_id(raw)
+            task_id = extract_comfly_image_task_id(raw) if comfly_async else extract_task_id(raw)
             if not task_id:
+                if comfly_async:
+                    raise HTTPException(status_code=502, detail="Comfly 异步提交未返回可识别的任务 ID 或图片；未自动重复提交，请检查供应商任务记录。") from exc
                 raise
+        if comfly_async:
+            LOG.info("comfly_image_async_submitted provider=%s model=%s upstream_task_id=%s", provider.get("id"), model, task_id)
         try:
-            task_result = await wait_for_image_task(client, task_id, provider)
+            if comfly_async:
+                task_result = await wait_for_image_task(client, task_id, provider, response_validator=validate_comfly_image_response)
+            else:
+                task_result = await wait_for_image_task(client, task_id, provider)
             return extract_image(task_result), task_result
         except HTTPException as exc:
             setattr(exc, "upstream_task_id", task_id)
             raise
+        except httpx.HTTPError as exc:
+            if not comfly_async:
+                raise
+            error = HTTPException(status_code=502, detail=f"Comfly 任务查询连接异常，task_id={task_id}；未重新提交生图，可稍后查询此任务。")
+            setattr(error, "upstream_task_id", task_id)
+            raise error from exc
 
 def upstream_message_from_record(item):
     role = item.get("role")
@@ -12003,23 +12366,51 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
     if path:
         filename = sanitize_export_filename(os.path.basename(name) if name else os.path.basename(path), os.path.basename(path))
         return FileResponse(path, media_type=content_type_for_path(path), filename=None if inline else filename)
-    # 远程文件：流式代理，绝不把整段视频/大文件读进内存（否则多个视频同时代理会撑爆内存、拖垮单进程服务）。
     parsed = urllib.parse.urlparse(str(url or "").strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="无效的下载地址")
+    cached_remote_image = ""
+    if inline:
+        _cache_root, _cache_key, cached_remote_image = remote_image_cache_location(url)
+        if cached_remote_image:
+            return FileResponse(cached_remote_image, media_type=remote_image_content_type(cached_remote_image))
     try:
         upstream_headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0"}
+        if inline:
+            upstream_headers["Accept-Encoding"] = "identity"
         range_header = request.headers.get("range")
         if range_header:
             upstream_headers["Range"] = range_header
-        upstream = requests.get(
-            url, stream=True, timeout=(10, 60),
+        upstream = requests_get_with_transient_retries(
+            url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT if inline and not range_header else (10, 60),
+            attempts=2 if inline and not range_header else 3, retry_delay=0.35,
             headers=upstream_headers,
         )
         upstream.raise_for_status()
     except requests.RequestException as exc:
+        LOG.warning(
+            "remote_output_download_failed host=%s status=%s error_type=%s",
+            parsed.hostname or "unknown",
+            getattr(getattr(exc, "response", None), "status_code", ""),
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=502, detail=f"远程文件下载失败：{exc}")
     content_type = upstream.headers.get("content-type") or "application/octet-stream"
+    normalized_content_type = content_type.split(";", 1)[0].strip().lower()
+    if inline and not range_header and upstream.status_code == 200 and normalized_content_type in REMOTE_IMAGE_CACHE_MIME_EXTS:
+        try:
+            cached = cache_remote_inline_image(url, upstream, upstream_headers)
+        except requests.RequestException as exc:
+            LOG.warning(
+                "remote_inline_image_download_failed host=%s error_type=%s",
+                parsed.hostname or "unknown",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=502, detail="远程图片下载失败，请稍后重试") from exc
+        if cached:
+            cached_path, cached_content_type = cached
+            return FileResponse(cached_path, media_type=cached_content_type)
+    # Non-image media remains streamed to avoid buffering large videos and files.
     fallback = filename_from_media_url(url, "download.bin")
     filename = sanitize_export_filename(os.path.basename(name) if name else fallback, fallback)
     disposition = "inline" if inline else "attachment"
@@ -14269,6 +14660,7 @@ async def fetch_upstream_models(provider_id: str):
 
 async def build_online_image_result(payload: OnlineImageRequest):
     provider = get_api_provider(payload.provider_id)
+    project_name = generated_image_project_name(payload.canvas_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
     request_size = snap_size_to_multiple(payload.size, 16)
@@ -14287,7 +14679,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         if not image_refs:
             raise HTTPException(status_code=400, detail="请先选择要放大的图片")
         count = 1
-    async def generate_one():
+    async def generate_one(request_index):
         if operation == "upscale":
             image_data, raw_item = await generate_jimeng_upscale_image(image_refs, payload.resolution_type)
         else:
@@ -14301,14 +14693,21 @@ async def build_online_image_result(payload: OnlineImageRequest):
             image_items = [image_data]
         local_urls = []
         local_items = []
-        for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
+        for image_index, item in enumerate(image_items):
+            name_stem = generated_image_name_stem(project_name, payload.prompt, request_index + image_index + 1)
+            local_url = await save_ai_image_to_output(item, prefix="online_", name_stem=name_stem)
             if local_url:
                 local_urls.append(local_url)
-                local_items.append(image_output_meta(local_url, item))
+                meta = image_output_meta(local_url, item)
+                extension = os.path.splitext(urllib.parse.urlparse(local_url).path)[1].lower()
+                if extension not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"):
+                    mime_type = str(item.get("mime_type") or "").lower()
+                    extension = ".jpg" if "jpeg" in mime_type else ".webp" if "webp" in mime_type else ".png"
+                meta["name"] = name_stem + extension
+                local_items.append(meta)
         return local_urls, local_items, raw_item
     try:
-        generated = await asyncio.gather(*(generate_one() for _ in range(count)))
+        generated = await asyncio.gather(*(generate_one(index) for index in range(count)))
     except httpx.HTTPStatusError as exc:
         log_net_error(f"生图 HTTP状态错误 provider={provider.get('id')} model={model} size={request_size}", exc)
         text = exc.response.text or ''
@@ -14328,6 +14727,8 @@ async def build_online_image_result(payload: OnlineImageRequest):
         raise HTTPException(status_code=502, detail=f"{provider_name} 没有返回图片：{raw_text}")
     result = {
         "prompt": payload.prompt,
+        "project_name": project_name,
+        "canvas_id": payload.canvas_id,
         "images": local_urls,
         "image_items": local_items,
         "timestamp": time.time(),
@@ -14346,7 +14747,8 @@ async def build_online_image_result(payload: OnlineImageRequest):
     return result
 
 @app.post("/api/online-image")
-async def online_image(payload: OnlineImageRequest):
+async def online_image(payload: OnlineImageRequest, request: Request):
+    populate_image_canvas_context(payload, request)
     return await build_online_image_result(payload)
 
 # Midjourney is intentionally kept outside the generic image-generation flow.
@@ -14811,7 +15213,8 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
             })
 
 @app.post("/api/canvas-image-tasks")
-async def create_canvas_image_task(payload: OnlineImageRequest):
+async def create_canvas_image_task(payload: OnlineImageRequest, request: Request):
+    populate_image_canvas_context(payload, request)
     task_id = f"canvas_img_{uuid.uuid4().hex}"
     with CANVAS_TASK_LOCK:
         CANVAS_TASKS[task_id] = {
@@ -16507,7 +16910,9 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
 
 @app.get("/api/canvases/{canvas_id}")
 async def get_canvas(canvas_id: str):
-    return {"canvas": load_canvas(canvas_id)}
+    canvas = load_canvas(canvas_id)
+    canvas["project_name"] = generated_image_project_name(canvas_id)
+    return {"canvas": canvas}
 
 @app.post("/api/canvases/{canvas_id}/touch")
 async def touch_canvas(canvas_id: str):

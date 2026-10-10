@@ -484,7 +484,7 @@ function smartMediaPreviewUrl(itemOrUrl, size=512){
     const displayItem = typeof itemOrUrl === 'object' && itemOrUrl ? {...itemOrUrl, url:raw} : raw;
     const displayUrl = displayMediaUrl(displayItem);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return displayUrl;
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return outputUrlLooksVideo(raw) ? displayUrl : raw;
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv)(\?|#|$)/i.test(raw)) return displayUrl;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
@@ -568,6 +568,11 @@ function isSmartPreviewImage(img){
 function bindSmartPreviewImageFallbacks(root=document){
     root.querySelectorAll?.('img[data-preview-src][data-original-src]:not([data-preview-fallback-bound])').forEach(img => {
         img.dataset.previewFallbackBound = '1';
+        const original = img.dataset.originalSrc || '';
+        if(/^https?:\/\//i.test(original) && img.dataset.previewKind !== 'video'){
+            bindImageProxyFallback(img, original);
+            return;
+        }
         img.addEventListener('error', () => {
             const original = img.dataset.originalSrc || '';
             if(img.dataset.previewKind === 'video'){
@@ -639,6 +644,7 @@ function syncSmartSelectedImageResolution(root=null){
     smartNodeElementsForHighResSync(root).forEach(scope => {
         scope.querySelectorAll?.('img[data-preview-src][data-original-src]').forEach(img => {
             if(img.dataset.previewKind === 'video') return;
+            if(img.dataset.proxyFallbackTried === '1') return;
             const preview = img.dataset.previewSrc || '';
             const original = img.dataset.originalSrc || '';
             if(!wantHighRes || !smartImageNearViewport(img)){
@@ -646,7 +652,8 @@ function syncSmartSelectedImageResolution(root=null){
                 if(preview && img.getAttribute('src') !== preview) img.src = preview;
                 return;
             }
-            const target = displayMediaUrl({url:smartOriginalMediaUrl(original)});
+            const originalUrl = smartOriginalMediaUrl(original);
+            const target = /^https?:\/\//i.test(originalUrl) ? originalUrl : displayMediaUrl({url:originalUrl});
             if(!target) return;
             img.dataset.selectedHighResTarget = target;
             if(smartSelectedHighResLoaded.has(target)){
@@ -6898,14 +6905,82 @@ function displayMediaUrl(itemOrUrl, name=''){
 }
 function bindImageProxyFallback(imgEl, itemOrUrl){
     if(!imgEl || imgEl.dataset.proxyFallbackBound === '1') return;
+    const original = smartOriginalMediaUrl(itemOrUrl);
+    if(!/^https?:\/\//i.test(original)) return;
     imgEl.dataset.proxyFallbackBound = '1';
-    imgEl.addEventListener('error', () => {
-        if(imgEl.dataset.proxyFallbackTried === '1') return;
+    let retryTimer = 0;
+    let retries = 0;
+    let directTimer = 0;
+    let proxyTimer = 0;
+    let stopped = false;
+    const clearTimers = () => {
+        clearTimeout(directTimer);
+        clearTimeout(proxyTimer);
+        clearTimeout(retryTimer);
+        directTimer = proxyTimer = retryTimer = 0;
+    };
+    const fail = () => {
+        clearTimers();
+        stopped = true;
+        imgEl.dataset.imageDeliveryState = 'failed';
+        imgEl.alt = '加载失败';
+        imgEl.title = '图片加载失败，请重新打开生成日志重试';
+        imgEl.removeAttribute('src');
+    };
+    const startProxy = (retry=false) => {
+        if(stopped || !imgEl.isConnected) return;
         const fallback = proxiedMediaUrl(itemOrUrl);
-        if(!fallback || fallback === imgEl.getAttribute('src')) return;
+        imgEl.dataset.previewSrc = fallback;
+        imgEl.dataset.imageDeliveryState = 'loading';
+        imgEl.src = retry ? fallback + '&_image_retry=' + retries + '-' + Date.now() : fallback;
+        proxyTimer = setTimeout(scheduleRetry, 20000);
+    };
+    const scheduleRetry = () => {
+        clearTimeout(proxyTimer);
+        proxyTimer = 0;
+        if(stopped || !imgEl.isConnected || retryTimer) return;
+        if(retries >= 3){ fail(); return; }
+        retries += 1;
+        retryTimer = setTimeout(() => {
+            retryTimer = 0;
+            startProxy(true);
+        }, 1500 * retries);
+    };
+    const useProxy = () => {
+        clearTimeout(directTimer);
+        directTimer = 0;
+        if(!imgEl.isConnected || (imgEl.complete && imgEl.naturalWidth > 0)) return;
         imgEl.dataset.proxyFallbackTried = '1';
-        imgEl.src = fallback;
-    });
+        delete imgEl.dataset.selectedHighResTarget;
+        startProxy();
+    };
+    const onLoad = () => {
+        clearTimers();
+        imgEl.dataset.imageDeliveryState = 'loaded';
+    };
+    const onError = () => {
+        if(stopped) return;
+        clearTimeout(directTimer);
+        if(imgEl.dataset.proxyFallbackTried !== '1'){
+            useProxy();
+        } else scheduleRetry();
+    };
+    imgEl.addEventListener('load', onLoad);
+    imgEl.addEventListener('error', onError);
+    imgEl.smartImageDeliveryCleanup = () => {
+        clearTimers();
+        stopped = true;
+        imgEl.removeEventListener('load', onLoad);
+        imgEl.removeEventListener('error', onError);
+        delete imgEl.dataset.proxyFallbackBound;
+        delete imgEl.dataset.proxyFallbackTried;
+        delete imgEl.dataset.imageDeliveryState;
+    };
+    directTimer = setTimeout(useProxy, 5000);
+    if(imgEl.complete){
+        if(imgEl.naturalWidth > 0) onLoad();
+        else useProxy();
+    }
 }
 function safeExportFileName(name, fallback='download.zip'){
     const cleaned = String(name || fallback).replace(/[\\/:*?"<>|]+/g, '_').trim();
@@ -6930,7 +7005,12 @@ function extensionForMediaItem(item, fallback='.png'){
 }
 function downloadNameForMediaItem(item, fallbackPrefix='canvas-output'){
     const localName = fileNameFromUrl(item?.url || '');
-    const preferred = localName || item?.name || '';
+    let preferred = item?.name || localName || '';
+    const projectName = typeof canvas !== 'undefined' ? String(canvas?.project_name || '') : '';
+    const projectPrefix = projectName.replace(/[\\/:*?"<>|\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').replace(/^[ ._]+|[ ._]+$/g, '').slice(0, 30).replace(/[ ._]+$/g, '');
+    if(projectPrefix && String(preferred).startsWith('未命名项目_')){
+        preferred = projectPrefix + String(preferred).slice('未命名项目'.length);
+    }
     const ext = extensionForMediaItem(item);
     const randomName = `${fallbackPrefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}${ext}`;
     let name = safeExportFileName(preferred || randomName, randomName);
@@ -7133,7 +7213,7 @@ function closeSmartLogLightbox(){
     if(!box) return;
     box.classList.remove('open');
     const img = box.querySelector('img');
-    if(img){ img.onerror = null; img.removeAttribute('src'); }
+    if(img){ img.smartImageDeliveryCleanup?.(); img.onerror = null; img.removeAttribute('src'); }
 }
 // 日志缩略图的轻量预览：只弹一张大图（不进编辑器那套裁剪/涂抹的重组件），点背景或关闭按钮即关。
 function openSmartLogLightbox(url, kind='image'){
@@ -7151,6 +7231,17 @@ function openSmartLogLightbox(url, kind='image'){
         });
     }
     const img = box.querySelector('img');
+    img.smartImageDeliveryCleanup?.();
+    img.onerror = null;
+    img.alt = 'preview';
+    img.title = '';
+    if(/^https?:\/\//i.test(smartOriginalMediaUrl(url))){
+        img.src = smartOriginalMediaUrl(url);
+        bindImageProxyFallback(img, url);
+        box.classList.add('open');
+        refreshIcons();
+        return;
+    }
     // 原图加载失败时回退到缩略图同款的 media-preview 代理（PIL 渲染，对截断文件更宽容）。
     let triedFallback = false;
     img.onerror = () => {
@@ -8275,7 +8366,7 @@ async function runJimengUpscale(node, index){
     try {
         const task = await fetch('/api/canvas-image-tasks', {
             method:'POST', headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({prompt:`upscale ${resolution}`, provider_id:providerId, model:'', operation:'upscale', resolution_type:resolution, n:1, reference_images:[{url:item.url, name:item.name || 'upscale-input.png'}]})
+            body:JSON.stringify({prompt:`upscale ${resolution}`, canvas_id:canvas?.id || canvasId || '', provider_id:providerId, model:'', operation:'upscale', resolution_type:resolution, n:1, reference_images:[{url:item.url, name:item.name || 'upscale-input.png'}]})
         }).then(async response => {
             if(!response.ok) throw new Error(await response.text());
             return response.json();
@@ -16291,6 +16382,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const payload = {
         prompt,
+        canvas_id:canvas?.id || canvasId || '',
         provider_id:runSettings.provider_id,
         model:runSettings.model,
         size:sizeForRun(runSettings),
