@@ -20,7 +20,6 @@ import asyncio
 import logging
 import contextvars
 import logging.handlers
-LOG = logging.getLogger("infinite_canvas")
 import requests
 import zipfile
 import mimetypes
@@ -181,7 +180,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.09.15.1"
+APP_VERSION = "2026.10.16.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -919,24 +918,6 @@ def default_api_providers():
             "ms_defaults_version": MODELSCOPE_DEFAULTS_VERSION,
         },
         {
-            "id": "apimart",
-            "name": "APIMART",
-            "base_url": APIMART_DEFAULT_BASE_URL,
-            "protocol": "apimart",
-            "image_request_mode": "openai",
-            "image_generation_endpoint": "",
-            "image_edit_endpoint": "",
-            "enabled": True,
-            "primary": False,
-            "image_models": APIMART_DEFAULT_IMAGE_MODELS,
-            "chat_models": [],
-            "video_models": [],
-            "ms_loras": [],
-            "ms_defaults_version": 0,
-            "model_names": {},
-            "model_protocols": {},
-        },
-        {
             "id": "runninghub",
             "name": "RunningHub",
             "base_url": RUNNINGHUB_DEFAULT_BASE_URL,
@@ -953,6 +934,24 @@ def default_api_providers():
             "ms_defaults_version": 0,
             "rh_apps": RUNNINGHUB_DEFAULT_APPS,
             "rh_workflows": RUNNINGHUB_DEFAULT_WORKFLOWS,
+        },
+        {
+            "id": "apimart",
+            "name": "APIMART",
+            "base_url": APIMART_DEFAULT_BASE_URL,
+            "protocol": "apimart",
+            "image_request_mode": "openai",
+            "image_generation_endpoint": "",
+            "image_edit_endpoint": "",
+            "enabled": True,
+            "primary": False,
+            "image_models": APIMART_DEFAULT_IMAGE_MODELS,
+            "chat_models": [],
+            "video_models": [],
+            "ms_loras": [],
+            "ms_defaults_version": 0,
+            "model_names": {},
+            "model_protocols": {},
         },
         {
             "id": "volcengine",
@@ -4865,23 +4864,13 @@ def is_apimart_provider(provider):
     return provider_protocol(provider) == "apimart" or "apimart.ai" in base_url
 
 def is_comfly_image_api_provider(provider):
-    """Comfly's APIMART-compatible endpoint exposes Gemini images via Generations.
-
-    It is deliberately detected from the configured host, because users may
-    keep the provider id/protocol as ``apimart`` while pointing it at Comfly's
-    OpenAI-compatible base URL.
-    """
+    """Comfly's APIMART-compatible endpoint uses Generations for Gemini images."""
     base_url = str((provider or {}).get("base_url") or "").lower()
     return "ai.comfly.org" in base_url or "comfly.org" in base_url
 
 def apimart_gemini_uses_generations(provider, model=""):
-    """Return whether a Gemini image model should use APIMART Generations.
-
-    Comfly documents Generations as the recommended route for its Gemini image
-    models. The native Gemini route remains available for the actual APIMART
-    host (and other providers that explicitly select the Gemini protocol).
-    """
     return is_comfly_image_api_provider(provider) and str(model or "").strip().lower().startswith("gemini-")
+
 def is_comfly_seedream_async_provider(provider, model=""):
     """Apply the documented async contract only to Comfly's Seedream model."""
     if str(model or "").strip() != "seedream-v5-pro":
@@ -10202,16 +10191,12 @@ def apimart_size_resolution(size):
     return best[2], resolution
 
 def apimart_image_generation_payload(model, prompt, size, quality="", image_refs=None, aspect_ratio="", resolution=""):
-    """Build APIMart's documented /v1/images/generations body."""
+    """Build APIMART's model-specific /v1/images/generations body."""
     model_text = str(model or "").strip().lower()
     body = {"model": model, "prompt": prompt}
     refs = [reference_to_data_url(ref, max_size=1536) for ref in (image_refs or [])[:ONLINE_IMAGE_REFERENCE_MAX]]
     refs = [value for value in refs if value]
     if model_text.startswith("gemini-") or "gemini-" in model_text:
-        # APIFox/Comfly Generations format: ratio is a separate field. The
-        # ``-2k`` Nano-banana-2 variant additionally accepts image_size and is
-        # documented with a fixed 2K output; do not send this field to the
-        # regular 3.1 Flash model, which does not advertise it.
         requested_ratio = str(aspect_ratio or "").strip().replace(" ", "")
         if not re.fullmatch(r"\d+:\d+", requested_ratio):
             requested_ratio = apimart_size_resolution(size)[0]
@@ -10231,8 +10216,6 @@ def apimart_image_generation_payload(model, prompt, size, quality="", image_refs
     if model_text.startswith("gpt-image-2") or model_text.startswith("seedream"):
         body["response_format"] = "url"
     else:
-        # The generic APIMart generations contract keeps aspect_ratio as a
-        # separate field; it is not a replacement for WxH in size.
         body["aspect_ratio"] = apimart_size_resolution(size)[0]
     return body
 
@@ -11809,10 +11792,6 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     # provider protocol (for example, a stale Volcengine/Ark selection).
     if effective_image_request_mode(provider, model) == "grsai":
         return await generate_grsai_provider_image(prompt, size, model, reference_images, provider, aspect_ratio, resolution)
-    # Comfly documents both Gemini image models on the OpenAI-compatible
-    # Generations endpoint. A saved APIMART override may still say ``gemini``
-    # (which is correct for api.apimart.ai's native route), so prefer the
-    # provider-host rule here and keep the request in the Generations branch.
     if effective_protocol(provider, model) == "gemini" and not apimart_gemini_uses_generations(provider, model):
         return await generate_gemini_provider_image(prompt, size, model, reference_images, provider, aspect_ratio, resolution)
     if is_volcengine_provider(provider):
@@ -11948,8 +11927,6 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_apimart:
-            # APIMart model-specific OpenAI-compatible format. Keep WxH in
-            # ``size``; do not replace it with an aspect-ratio string.
             body = apimart_image_generation_payload(model, prompt, size, quality, image_refs, aspect_ratio, resolution)
             response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
         elif is_gpt2 and not image_refs and not mask_refs:
@@ -14664,9 +14641,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
     request_size = snap_size_to_multiple(payload.size, 16)
-    # GPT-Image-2 documents a 3840px max edge, 16px alignment and an
-    # 8,294,400-pixel ceiling.  The UI's 4K square preset is 4096x4096, so
-    # normalize it before any provider-specific request is built.
+    # GPT-Image-2 has a 3840px max edge and an 8,294,400-pixel ceiling.
     if is_gpt_image_2_model(model):
         request_size = normalize_gpt_image_2_size(request_size)
     refs = [ref.dict() for ref in payload.reference_images if ref.url]

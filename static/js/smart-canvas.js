@@ -17601,7 +17601,6 @@ shell.addEventListener('mousedown', e => {
     const nodeId = nodeEl?.dataset?.id || '';
     const unselectedNodePan = e.button === 0 && fromNode && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !isNodeSelected(nodeId);
     if(!forcePan && !unselectedNodePan) return;
-    // 编辑控件保留原生输入/按钮行为；空格+左键和中键可从节点内容表面平移。
     if(forcePan && e.target.closest?.(SMART_CANVAS_PAN_HARD_CONTROL_SELECTOR)) return;
     if(!forcePan && e.target.closest?.(SMART_CANVAS_NODE_CONTROL_SELECTOR)) return;
     if(beginSmartCanvasPan(e, {fromNode})) e.stopImmediatePropagation();
@@ -18049,7 +18048,6 @@ window.onmouseup = e => {
         const moved = didPan;
         panState = null;
         shell.classList.remove('panning');
-        // 节点上的平移手势结束后不要再触发节点点击（否则一次拖动会误选中节点）。
         if(moved) suppressNodeClickUntil = Date.now() + 180;
         scheduleSave();
         setTimeout(() => { didPan = false; }, 0);

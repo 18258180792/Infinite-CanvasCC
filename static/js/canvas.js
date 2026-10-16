@@ -15847,14 +15847,7 @@ board.addEventListener('click', e => {
     if(nodeEl?.dataset?.id) exitZoomPreviewToNode(nodeEl.dataset.id);
     else exitZoomPreview(screenToWorld(e.clientX, e.clientY));
 }, true);
-board.addEventListener('mousedown', e => {
-    if(!canvas || e.button !== 0 || zoomPreviewState || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
-    const nodeEl = e.target.closest?.('.node');
-    if(!nodeEl) return;
-    const node = nodes.find(item => item.id === nodeEl.dataset.id);
-    if(!node || selected.has(node.id)) return;
-    if(startBoardPan(e, {clearSelectionOnClick:true})) e.stopImmediatePropagation();
-}, true);function startBoardPan(e, opts={}){
+function startBoardPan(e, opts={}){
     if(!canvas) return false;
     if(isEditableTarget(e.target) || e.target.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap')) return false;
     e.preventDefault();
@@ -15932,6 +15925,14 @@ board.addEventListener('mousedown', e => {
     if(e.target.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu')) return;
     closeCreateMenu();
 });
+board.addEventListener('mousedown', e => {
+    if(!canvas || e.button !== 0 || zoomPreviewState || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+    const nodeEl = e.target.closest?.('.node');
+    if(!nodeEl) return;
+    const node = nodes.find(item => item.id === nodeEl.dataset.id);
+    if(!node || selected.has(node.id)) return;
+    if(startBoardPan(e, {clearSelectionOnClick:true})) e.stopImmediatePropagation();
+}, true);
 board.onwheel = e => {
     if(!canvas) return;
     e.preventDefault();

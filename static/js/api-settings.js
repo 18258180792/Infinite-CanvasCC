@@ -187,7 +187,7 @@ const RECOMMENDED_APIS = [
         id:'apimart',
         name:'APIMART',
         category:'allround',
-        base_url:'https://api.apimart.ai',
+        base_url:'https://ai.comfly.org/v1',
         protocol:'apimart',
         register_url:'https://apimart.ai/zh/register?aff=1uyAbb',
         register_url_cn:'https://apib.ai/register?aff=1uyAbb',
@@ -195,8 +195,6 @@ const RECOMMENDED_APIS = [
         icons:['IMG','VID','LLM'],
         summaryKey:'api.recommendApimartSummary',
         advantages:['模型类型覆盖广', '适合多节点混合工作流', '异步协议适合长任务'],
-        // APIMART/Comfly 的 Gemini 图片模型走 /v1/images/generations；
-        // -2k 的原生 Gemini 路由仅在实际 api.apimart.ai Base URL 下使用。
         image_models:['seedream-v5-pro', 'gpt-image-2', 'gemini-3.1-flash-image-preview', 'nano-banana-pro-4k'],
         model_protocols:{}
     },
