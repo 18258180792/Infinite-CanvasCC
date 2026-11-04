@@ -6,6 +6,8 @@ const statusEl = document.getElementById('status');
 const nameInput = document.getElementById('nameInput');
 const idInput = document.getElementById('idInput');
 const baseInput = document.getElementById('baseInput');
+const soonStudioEndpointRow = document.getElementById('soonStudioEndpointRow');
+const soonStudioEndpointInput = document.getElementById('soonStudioEndpointInput');
 const protocolInput = document.getElementById('protocolInput');
 const imageRequestModeInput = document.getElementById('imageRequestModeInput');
 const imageEditRouteInput = document.getElementById('imageEditRouteInput');
@@ -197,6 +199,22 @@ const RECOMMENDED_APIS = [
         advantages:['模型类型覆盖广', '适合多节点混合工作流', '异步协议适合长任务'],
         image_models:['seedream-v5-pro', 'gpt-image-2', 'gemini-3.1-flash-image-preview', 'nano-banana-pro-4k'],
         model_protocols:{}
+    },
+    {
+        id:'soonstudio',
+        name:'SoonStudio',
+        category:'allround',
+        base_url:'https://api.soonstudio.ai/v1',
+        protocol:'openai',
+        image_request_mode:'openai',
+        register_url:'https://soonstudio.ai/',
+        tagKeys:['api.tagImageModels','api.tagVideoModels','api.tagLlmModels'],
+        icons:['IMG','VID','LLM'],
+        summaryKey:'api.recommendSoonstudioSummary',
+        image_models:['seedream-v5-pro', 'gpt-image-2', 'Dola-Seedream-5.0-Flash'],
+        chat_models:[],
+        video_models:[],
+        model_groups:{'Dola-Seedream-5.0-Flash':'sd-global'}
     },
     {
         id:'lingjing',
@@ -2259,14 +2277,16 @@ function renderRecommendApi(){
     refreshIcons();
 }
 function recommendedProviderForApi(api){
-    let item = providers.find(provider =>
+    let item = api.id === 'soonstudio' ? providers.find(isSoonStudioProvider) : null;
+    item = item || providers.find(provider =>
         (api.id && String(provider.id || '').toLowerCase() === String(api.id).toLowerCase())
         || String(provider.name || '').toLowerCase() === api.name.toLowerCase()
     );
     if(item){
-        item.base_url = api.base_url || item.base_url || '';
+        item.base_url = api.id === 'soonstudio' && isSoonStudioProvider(item) ? item.base_url : (api.base_url || item.base_url || '');
         item.protocol = api.protocol || item.protocol || 'openai';
         item.image_request_mode = normalizeImageRequestMode(api.image_request_mode || item.image_request_mode);
+        item.model_groups = {...(api.model_groups || {}), ...(item.model_groups || {})};
         item.image_edit_route = normalizeImageEditRoute(api.image_edit_route || item.image_edit_route);
         if(Array.isArray(api.video_models)) item.video_models = [...api.video_models];
         if(api.empty_models_on_save){
@@ -2296,6 +2316,7 @@ function recommendedProviderForApi(api){
         chat_models:api.empty_models_on_save ? [] : (Array.isArray(api.chat_models) ? [...api.chat_models] : []),
         video_models:api.empty_models_on_save ? [] : (Array.isArray(api.video_models) ? [...api.video_models] : []),
         model_protocols:api.empty_models_on_save ? {} : ((api.model_protocols && typeof api.model_protocols === 'object') ? {...api.model_protocols} : {}),
+        model_groups:{...(api.model_groups || {})},
         has_key:false,
         key_preview:''
     };
@@ -2307,14 +2328,14 @@ async function saveRecommendedApi(index){
     if(!api) return;
     const input = recommendPanel?.querySelector(`[data-recommend-key="${index}"]`);
     const key = input?.value.trim() || '';
-    if(!key){ alert(tr('api.enterApiKey')); return; }
+    if(!key && !(api.id === 'soonstudio' && providers.some(item => isSoonStudioProvider(item) && item.has_key))){ alert(tr('api.enterApiKey')); return; }
     const item = recommendedProviderForApi(api);
     selectedId = item.id;
     recommendInlineOpen = false;
     syncRecommendView();
     renderProviderList();
     renderEditor();
-    keyInput.value = key;
+    if(key) keyInput.value = key;
     if(protocolInput){
         protocolInput.value = api.protocol;
         protocolInput.dispatchEvent(new Event('change'));
@@ -2457,6 +2478,7 @@ function renderEditor(){
     clearVerifyResult();
     baseInput.placeholder = EXAMPLE_BASE_URL;
     baseInput.value = item.base_url || '';
+    syncSoonStudioEndpointRow();
     const lockedApi = lockedRecommendedApi(item);
     if(lockedApi) applyLockedRecommendedProtocol(item);
     if(protocolInput){
@@ -3402,6 +3424,24 @@ function modelProtocolSelectHtml(kind, index, model, item){
         ${opt('gemini', 'Gemini')}
     </select>`;
 }
+function isSoonStudioProvider(item){
+    try {
+        return ['api.soonstudio.ai', 'api-cn.soonstudio.ai', 'api-hk.soonstudio.ai', 'api-us.soonstudio.ai'].includes(new URL(String(item?.base_url || '')).hostname.toLowerCase());
+    } catch(e) { return false; }
+}
+function syncSoonStudioEndpointRow(){
+    if(!soonStudioEndpointRow || !soonStudioEndpointInput) return;
+    const url = String(baseInput?.value || '').trim().replace(/\/+$/, '');
+    soonStudioEndpointRow.hidden = !isSoonStudioProvider({base_url:url});
+    if(!soonStudioEndpointRow.hidden) soonStudioEndpointInput.value = url;
+}
+function selectSoonStudioEndpoint(value){
+    if(!isSoonStudioProvider({base_url:value})) return;
+    baseInput.value = value;
+    const item = provider();
+    if(item) item.base_url = value;
+    clearVerifyResult();
+}
 function renderModels(kind){
     const item = provider();
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
@@ -3419,6 +3459,7 @@ function renderModels(kind){
                 <div class="model-id-field">
                     ${label && label !== model ? `<div class="model-display-name">${escapeHtml(label)}</div>` : ''}
                     <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)">
+                    ${isSoonStudioProvider(item) ? `<label class="model-group-field"><span>${escapeHtml(tr('api.modelGroup'))}</span><input value="${escapeAttr(item.model_groups?.[model] || '')}" placeholder="${escapeAttr(tr('api.defaultGroup'))}" title="${escapeAttr(tr('api.modelGroupHint'))}" oninput="updateModelGroup('${kind}', ${index}, this.value)"></label>` : ''}
                 </div>
                 ${modelProtocolSelectHtml(kind, index, model, item)}
                 <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
@@ -3667,6 +3708,11 @@ function updateModel(kind, index, value){
             if(newName && label && label !== newName) item.model_names[newName] = label;
         }
     }
+    if(item.model_groups && oldName && oldName !== newName && Object.prototype.hasOwnProperty.call(item.model_groups, oldName)){
+        const group = item.model_groups[oldName];
+        if(!modelProtocolStillUsed(item, oldName)) delete item.model_groups[oldName];
+        if(newName) item.model_groups[newName] = group;
+    }
     if(kind === 'image') renderMsLoras();
 }
 function updateModelProtocol(kind, index, value){
@@ -3682,6 +3728,16 @@ function updateModelProtocol(kind, index, value){
         delete item.model_protocols[name];
     }
 }
+function updateModelGroup(kind, index, value){
+    const item = provider();
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    const name = String(item?.[key]?.[index] || '').trim();
+    if(!name) return;
+    if(!item.model_groups || typeof item.model_groups !== 'object') item.model_groups = {};
+    const group = String(value || '').trim();
+    if(group) item.model_groups[name] = group;
+    else delete item.model_groups[name];
+}
 function removeModel(kind, index){
     const item = provider();
     const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
@@ -3694,6 +3750,7 @@ function removeModel(kind, index){
     if(removed && item.model_names && typeof item.model_names === 'object' && !modelProtocolStillUsed(item, removed)){
         delete item.model_names[removed];
     }
+    if(removed && item.model_groups && !modelProtocolStillUsed(item, removed)) delete item.model_groups[removed];
     renderModels(kind);
     if(kind === 'image') renderMsLoras();
 }
@@ -3787,6 +3844,7 @@ async function saveProviders(){
                 video_models:item.video_models || [],
                 model_names:(item.model_names && typeof item.model_names === 'object') ? item.model_names : {},
                 model_protocols:(item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {},
+                model_groups:(item.model_groups && typeof item.model_groups === 'object') ? item.model_groups : {},
                 ms_loras:item.id === 'modelscope' ? (item.ms_loras || []) : [],
                 ms_defaults_version:item.id === 'modelscope' ? (item.ms_defaults_version || 1) : 0,
                 rh_apps:item.id === 'runninghub' ? (item.rh_apps || []) : [],
@@ -3869,7 +3927,7 @@ window.onload = () => {
     // 平台名输入时实时预览生成的 ID
     if(nameInput) nameInput.addEventListener('input', updateIdPreview);
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
-    if(baseInput) baseInput.addEventListener('input', () => updateApimartDomesticHint());
+    if(baseInput) baseInput.addEventListener('input', () => { updateApimartDomesticHint(); syncSoonStudioEndpointRow(); });
     if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
         const item = provider();
         if(!item) return;

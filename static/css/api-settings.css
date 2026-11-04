@@ -212,6 +212,13 @@ body.studio-theme-dark .model-row { background:var(--soft); border-color:var(--l
 .model-row input { height:34px; padding:0 10px; border:0; background:transparent; font-size:12.5px; }
 .model-id-field { min-width:0; display:flex; flex-direction:column; gap:2px; }
 .model-id-field input { width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.model-group-field { display:flex; align-items:center; gap:6px; min-width:0; padding:0 6px 4px 10px; color:var(--faint); font-size:11px; font-weight:700; }
+.model-group-field input { width:min(190px,100%); height:26px; min-width:0; padding:0 7px; border:1px solid var(--line); border-radius:6px; background:var(--soft); color:var(--text); font-size:11px; }
+body.studio-theme-dark .model-group-field input { background:var(--panel); border-color:var(--line-strong); }
+.soonstudio-endpoint-row { display:flex; align-items:center; gap:8px; margin-top:7px; color:var(--faint); font-size:11px; font-weight:700; }
+.soonstudio-endpoint-row[hidden] { display:none; }
+.soonstudio-endpoint-row select { height:30px; min-width:135px; max-width:100%; padding:0 8px; border:1px solid var(--line); border-radius:6px; background:var(--soft); color:var(--text); font-size:11px; }
+body.studio-theme-dark .soonstudio-endpoint-row select { background:var(--panel); border-color:var(--line-strong); }
 .model-display-name { padding:5px 10px 0; color:var(--text); font-size:12px; line-height:1.25; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .model-protocol-select { height:30px; padding:0 8px; border:1px solid var(--line); border-radius:8px; background:var(--soft); color:var(--text); font-size:11.5px; font-weight:700; outline:none; cursor:pointer; min-width:74px; }
 body.studio-theme-dark .model-protocol-select { background:var(--panel); border-color:var(--line-strong); }

@@ -16,12 +16,12 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.10.16.1.1792142826"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.10.16.1.1792142826"></script>
-    <script src="/static/js/theme.js?v=2026.10.16.1.1792142826"></script>
-    <script src="/static/js/i18n.js?v=2026.10.16.1.1788830090"></script>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.10.16.1.1792142826">
-    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.10.16.1.1787893551">
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.04.1.1793794900"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.11.04.1.1793794900"></script>
+    <script src="/static/js/theme.js?v=2026.11.04.1.1793794900"></script>
+    <script src="/static/js/i18n.js?v=2026.11.04.1.1793796685"></script>
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.04.1.1793794900">
+    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.11.04.1.1793796196">
 </head>
 <body>
     <div class="page">
@@ -97,6 +97,15 @@
                             <label class="field full api-base-url-field">
                                 <span class="label" data-i18n="api.baseUrl">请求地址</span>
                                 <div class="field-frame"><input id="baseInput" type="text" placeholder="https://api.example.com/v1"></div>
+                                <div id="soonStudioEndpointRow" class="soonstudio-endpoint-row" hidden>
+                                    <span data-i18n="api.soonstudioEndpoint">SoonStudio 线路</span>
+                                    <select id="soonStudioEndpointInput" onchange="selectSoonStudioEndpoint(this.value)" title="SoonStudio API 线路">
+                                        <option value="https://api.soonstudio.ai/v1" data-i18n="api.soonstudioDefault">默认</option>
+                                        <option value="https://api-cn.soonstudio.ai/v1" data-i18n="api.soonstudioCn">中国大陆</option>
+                                        <option value="https://api-hk.soonstudio.ai/v1" data-i18n="api.soonstudioHk">香港</option>
+                                        <option value="https://api-us.soonstudio.ai/v1" data-i18n="api.soonstudioUs">美西</option>
+                                    </select>
+                                </div>
                                 <div class="ms-hint">
                                     <span class="ms-line"><span data-i18n="api.msChinaEndpoint">国内默认请求地址：</span><span class="inline-code">https://api-inference.modelscope.cn/v1</span></span>
                                     <span class="ms-line"><span data-i18n="api.msGlobalEndpoint">国外使用请求地址：</span><span class="inline-code">https://api-inference.modelscope.ai/v1</span></span>
@@ -582,6 +591,6 @@
         </div>
     </div>
 
-    <script src="/static/js/api-settings.js?v=2026.10.16.1.1788489473"></script>
+    <script src="/static/js/api-settings.js?v=2026.11.04.1.1793796196"></script>
 </body>
 </html>

@@ -17102,11 +17102,11 @@ async function queryJimengNow(nodeId){
 function providerIdForSmartTask(node, task){
     return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';
 }
-async function fetchImageTaskQuery(providerId, taskId){
+async function fetchImageTaskQuery(providerId, taskId, model=''){
     return fetch('/api/image-task-query', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({provider_id:providerId || 'comfly', task_id:taskId})
+        body:JSON.stringify({provider_id:providerId || 'comfly', task_id:taskId, model})
     }).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
@@ -17126,7 +17126,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     task.recoverTaskId = recoverTaskId;
     render();
     try {
-        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
+        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId, task.model || node?.runSettings?.model || '');
         if(data.status === 'succeeded'){
             task.failed = false;
             task.querying = false;

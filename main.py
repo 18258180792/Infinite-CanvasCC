@@ -20,6 +20,7 @@ import asyncio
 import logging
 import contextvars
 import logging.handlers
+import ssl
 import requests
 import zipfile
 import mimetypes
@@ -180,7 +181,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.10.16.1"
+APP_VERSION = "2026.11.04.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -1394,6 +1395,23 @@ def runninghub_openapi_url(provider, path=""):
     base = runninghub_openapi_base_url(provider)
     return f"{base}/{path}" if path else base
 
+def is_soonstudio_provider(provider):
+    try:
+        host = urllib.parse.urlsplit(str((provider or {}).get("base_url") or "")).hostname
+    except ValueError:
+        return False
+    return host in {"api.soonstudio.ai", "api-cn.soonstudio.ai", "api-hk.soonstudio.ai", "api-us.soonstudio.ai"}
+
+def normalize_model_groups(value):
+    groups = {}
+    if isinstance(value, dict):
+        for raw_model, raw_group in value.items():
+            model = str(raw_model or "").strip()
+            group = str(raw_group or "").strip()
+            if model and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", group):
+                groups[model] = group
+    return groups
+
 def normalize_provider(item):
     provider_id = str(item.get("id") or "").strip().lower()
     if not PROVIDER_ID_RE.fullmatch(provider_id):
@@ -1425,6 +1443,9 @@ def normalize_provider(item):
     if provider_id == "runninghub":
         protocol = "runninghub"
         base_url = base_url or RUNNINGHUB_DEFAULT_BASE_URL
+    if is_soonstudio_provider({"base_url": base_url}):
+        protocol = "openai"
+        image_request_mode = "openai"
     locked_rule = locked_recommended_provider_rule(provider_id, name, base_url)
     if locked_rule:
         protocol = locked_rule["protocol"]
@@ -1447,6 +1468,7 @@ def normalize_provider(item):
         "video_models": video_models,
         "model_names": normalize_model_name_map(item.get("model_names")),
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
+        "model_groups": normalize_model_groups(item.get("model_groups")),
         "ms_loras": normalize_ms_loras(item.get("ms_loras") or []),
         "ms_defaults_version": int(item.get("ms_defaults_version") or 0),
         "rh_apps": normalize_runninghub_entries(item.get("rh_apps") or [], "app"),
@@ -2822,6 +2844,7 @@ class MidjourneyModalRequest(BaseModel):
 class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
     task_id: str = Field(min_length=1, max_length=240)
+    model: str = ""
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
@@ -2926,6 +2949,7 @@ class ApiProviderPayload(BaseModel):
     video_models: List[str] = []
     model_names: Dict[str, str] = {}
     model_protocols: Dict[str, str] = {}
+    model_groups: Dict[str, str] = {}
     ms_loras: List[Dict[str, Any]] = []
     ms_defaults_version: int = 0
     rh_apps: List[Dict[str, Any]] = []
@@ -4103,6 +4127,10 @@ def api_headers(json_body=True, provider=None, model=""):
         headers = {"Accept": "application/json", "x-goog-api-key": api_key}
     else:
         headers = {"Accept": "application/json", "Authorization": bearer_auth_value(api_key)}
+    if provider and model and is_soonstudio_provider(provider):
+        group = (provider.get("model_groups") or {}).get(model)
+        if group:
+            headers["x-studio-channel-group"] = group
     if json_body:
         headers["Content-Type"] = "application/json"
     return headers
@@ -4215,6 +4243,9 @@ def looks_like_generated_image_url(value):
     if text.startswith("data:image/"):
         return True
     clean = text.split("?", 1)[0].split("#", 1)[0].lower()
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme == "https" and parsed.hostname == "soonstudio.ai" and parsed.path.startswith("/api/media/"):
+        return True
     return text.startswith(("http://", "https://", "/output/", "/assets/")) and re.search(r"\.(png|jpe?g|webp|gif|bmp|tiff?)$", clean)
 
 def looks_like_image_base64(value):
@@ -6976,7 +7007,7 @@ def image_task_url_for_provider(provider, task_id):
     # 提交走 /v1/videos，轮询必须走 /v1/videos/{id}；否则 protocol=apimart 的平台会错走 /v1/tasks/{id}
     if normalize_image_request_mode((provider or {}).get("image_request_mode")) == "openai-video-proxy":
         return f"{base_url}/videos/{task_id}" if base_url.endswith("/v1") else f"{base_url}/v1/videos/{task_id}"
-    if is_apimart_provider(provider):
+    if is_apimart_provider(provider) and not is_soonstudio_provider(provider):
         return f"{base_url}/tasks/{task_id}" if base_url.endswith("/v1") else f"{base_url}/v1/tasks/{task_id}"
     return f"{base_url}/images/tasks/{task_id}" if base_url.endswith("/v1") else f"{base_url}/v1/images/tasks/{task_id}"
 
@@ -6987,7 +7018,8 @@ def image_task_data(payload):
 
 def image_task_status(payload):
     task_data = image_task_data(payload)
-    return str(task_data.get("status") or task_data.get("task_status") or "").upper()
+    top = payload if isinstance(payload, dict) else {}
+    return str(task_data.get("status") or task_data.get("task_status") or top.get("status") or top.get("task_status") or "").upper()
 
 def image_task_fail_reason(payload):
     task_data = image_task_data(payload)
@@ -7042,20 +7074,20 @@ def requests_get_with_transient_retries(url, attempts=3, retry_delay=0.35, **kwa
         return response
     raise requests.RequestException(f"请求失败：GET {host}")
 
-async def fetch_image_task_payload(client, task_id, provider=None):
+async def fetch_image_task_payload(client, task_id, provider=None, model=""):
     task_url = image_task_url_for_provider(provider, task_id)
     response = await httpx_request_with_transient_retries(
         client,
         "GET",
         task_url,
         attempts=3,
-        headers=api_headers(provider=provider),
+        headers=api_headers(provider=provider, model=model),
     )
     response.raise_for_status()
     return response.json()
 
-async def wait_for_image_task(client, task_id, provider=None, response_validator=None):
-    is_apimart = is_apimart_provider(provider)
+async def wait_for_image_task(client, task_id, provider=None, response_validator=None, model=""):
+    is_apimart = is_apimart_provider(provider) and not is_soonstudio_provider(provider)
     is_tudou_async = is_tudou_async_image_mode(provider)
     timeout = TUDOU_ASYNC_IMAGE_TASK_TIMEOUT if is_tudou_async else APIMART_IMAGE_TASK_TIMEOUT if is_apimart else IMAGE_TASK_TIMEOUT
     interval = TUDOU_ASYNC_IMAGE_POLL_INTERVAL if is_tudou_async else APIMART_IMAGE_POLL_INTERVAL if is_apimart else IMAGE_POLL_INTERVAL
@@ -7068,7 +7100,7 @@ async def wait_for_image_task(client, task_id, provider=None, response_validator
             initial_delay = 0
             if time.monotonic() >= deadline:
                 break
-        last_payload = await fetch_image_task_payload(client, task_id, provider)
+        last_payload = await fetch_image_task_payload(client, task_id, provider, model=model)
         if response_validator:
             response_validator(last_payload)
         status = image_task_status(last_payload)
@@ -9933,7 +9965,9 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
     value = rewrite_runninghub_file_url(value)
     try:
         timeout = httpx.Timeout(connect=4.0, read=6.0, write=8.0, pool=4.0)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        media_url = urllib.parse.urlsplit(value)
+        soonstudio_media = media_url.hostname == "soonstudio.ai" and media_url.path.startswith("/api/media/")
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=not soonstudio_media) as client:
             response = await asyncio.wait_for(
                 httpx_request_with_transient_retries(
                     client, "GET", value, attempts=2, retry_delay=0.35
@@ -10277,6 +10311,8 @@ def normalize_volcengine_size(size, model=""):
 def friendly_image_error_detail(text, size="", model=""):
     text = str(text or "")
     lower_text = text.lower()
+    if "insufficient_user_quota" in lower_text:
+        return "上游账户余额不足，无法支付本次生图的预扣费；请检查余额或换用其他模型。"
     if "width must be integer in [64,2048]" in lower_text or "height must be integer in [64,2048]" in lower_text:
         return f"上游接口要求宽度和高度必须是 64–2048 的整数，当前尺寸为 {size or '未指定'}。已自动按比例缩放；如果仍失败，请改用 2048 或更小的尺寸。"
     if is_gpt_image_2_model(model) and gpt_image_2_size_exceeds_supported(size):
@@ -11801,7 +11837,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     if is_tudou_provider(provider) and is_tudou_grok_image_model(model):
         return await generate_tudou_grok_image(prompt, size, model, reference_images, provider, aspect_ratio)
     is_gpt2 = is_gpt_image_2_model(model)
-    is_apimart = is_apimart_provider(provider)
+    is_apimart = is_apimart_provider(provider) and not is_soonstudio_provider(provider)
     # 不对 GPT 尺寸做任何缩小/拦截：用户选什么尺寸就原样发给上游；
     # 若超过 GPT 的最大像素限制被上游拒绝，再由 friendly_image_error_detail 给出友好的像素上限提示。
     quality = str(quality or "").strip().lower()
@@ -11816,13 +11852,14 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
+    is_soonstudio = is_soonstudio_provider(provider)
     comfly_async = is_comfly_seedream_async_provider(provider, model)
     if comfly_async and mask_refs:
         raise HTTPException(status_code=400, detail="Comfly seedream-v5-pro 的 JSON 接口未声明 mask 支持，已停止提交，避免忽略局部编辑范围。")
-    request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
+    request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or is_soonstudio or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
     if comfly_async:
         request_timeout = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=15.0)
-    async with httpx.AsyncClient(timeout=request_timeout) as client:
+    async with httpx.AsyncClient(timeout=request_timeout, trust_env=not is_soonstudio) as client:
         response = None
         async def post_openai_edits(edit_files=None):
             data = {"model": model, "prompt": prompt, "size": size}
@@ -11830,6 +11867,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 data["quality"] = quality
             return await client.post(
                 edit_url,
+                params={"async": "true"} if is_soonstudio else None,
                 headers=api_headers(json_body=False, provider=provider, model=model),
                 data=data,
                 files=edit_files if edit_files is not None else {},
@@ -11925,15 +11963,15 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if image_refs:
                 extra_body["image"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
         elif is_apimart:
             body = apimart_image_generation_payload(model, prompt, size, quality, image_refs, aspect_ratio, resolution)
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
         elif is_gpt2 and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 body["quality"] = quality
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
         elif image_refs:
@@ -11972,6 +12010,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                     fh.close()
             # 2) edits 失败 → 非 GPT-Image-2 可回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
             if response is None:
+                if is_soonstudio and edit_failed_status == -1:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="SoonStudio 图片编辑连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。",
+                    )
                 if is_gpt2:
                     raise HTTPException(
                         status_code=502,
@@ -11986,7 +12029,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 }
                 if quality:
                     body["quality"] = quality
-                response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+                response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
                 if response.status_code >= 400 and images_api_unsupported(response):
                     raise HTTPException(
                         status_code=502,
@@ -11998,6 +12041,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 body["quality"] = quality
             response = await client.post(
                 gen_url,
+                params={"async": "true"} if is_soonstudio else None,
                 headers=api_headers(provider=provider, model=model),
                 json=body,
             )
@@ -12030,7 +12074,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if comfly_async:
                 task_result = await wait_for_image_task(client, task_id, provider, response_validator=validate_comfly_image_response)
             else:
-                task_result = await wait_for_image_task(client, task_id, provider)
+                task_result = await wait_for_image_task(client, task_id, provider, model=model)
             return extract_image(task_result), task_result
         except HTTPException as exc:
             setattr(exc, "upstream_task_id", task_id)
@@ -14344,6 +14388,32 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
     api_key = api_key_from_payload(payload, protocol)
     if not api_key:
         raise HTTPException(status_code=400, detail="请先填写或保存 API Key")
+    if is_soonstudio_provider({"base_url": base_url}):
+        try:
+            async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+                ok, probe = await probe_openai_models_endpoint(client, base_url, api_key)
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            return {
+                "ok": False,
+                "protocol": "openai",
+                "image_request_mode": "openai",
+                "status_code": 0,
+                "message": f"SoonStudio 当前线路直连失败（{type(exc).__name__}），请切换线路后重试",
+                "raw": None,
+            }
+        return {
+            "ok": ok,
+            "protocol": "openai",
+            "image_request_mode": "openai",
+            "status_code": probe.get("status") or 0,
+            "message": "SoonStudio 模型接口可用；图片任务使用 /v1/images/tasks/{task_id}" if ok else probe.get("message") or "SoonStudio 模型接口不可用",
+            "raw": probe.get("raw"),
+            "model_count": probe.get("model_count") or 0,
+            "image_models": probe.get("image_models") or [],
+            "chat_models": probe.get("chat_models") or [],
+            "video_models": probe.get("video_models") or [],
+            "all": probe.get("all") or [],
+        }
     is_tudou_async = is_tudou_base_url(base_url)
     if protocol == "volcengine":
         try:
@@ -14689,6 +14759,9 @@ async def build_online_image_result(payload: OnlineImageRequest):
         friendly = friendly_image_error_detail(text, request_size, model)
         detail = friendly or f"上游生图接口错误：{text[:300]}"
         raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except ssl.SSLError as exc:
+        log_net_error(f"生图 TLS错误 provider={provider.get('id')} model={model}", exc)
+        raise HTTPException(status_code=502, detail="上游 TLS 连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。") from exc
     except httpx.HTTPError as exc:
         log_net_error(f"生图 网络/TLS错误 provider={provider.get('id')} model={model}", exc)
         raise HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}") from exc
@@ -15077,8 +15150,8 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            raw = await fetch_image_task_payload(client, task_id, provider)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=not is_soonstudio_provider(provider)) as client:
+            raw = await fetch_image_task_payload(client, task_id, provider, model=payload.model)
     except httpx.HTTPStatusError as exc:
         log_net_error(f"查询生图任务 HTTP状态错误 provider={provider.get('id')} task_id={task_id}", exc)
         text = exc.response.text or ""

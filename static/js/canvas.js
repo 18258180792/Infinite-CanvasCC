@@ -13667,7 +13667,7 @@ async function queryRecoverPendingOutput(pendingId){
         const res = await fetch('/api/image-task-query', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({provider_id:providerIdForPending(pending), task_id:taskId})
+            body:JSON.stringify({provider_id:providerIdForPending(pending), task_id:taskId, model:pending.model || pending.run?.request?.model || ''})
         });
         if(!res.ok) throw new Error(await responseErrorMessage(res, '查询失败'));
         const data = await res.json();
