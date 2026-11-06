@@ -1,11 +1,14 @@
 import base64
+import io
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main
@@ -24,6 +27,12 @@ class SoonStudioDolaTests(unittest.IsolatedAsyncioTestCase):
             'model_groups': {MODEL: 'sd-global'},
         }
         self.requests = []
+
+    def inline_png(self, size=(16, 16), pixels=None):
+        image = Image.frombytes("RGB", size, pixels) if pixels is not None else Image.new("RGB", size, (20, 30, 40))
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return {"url": "data:" + "image/png;base64," + base64.b64encode(output.getvalue()).decode(), "kind": "image"}
 
     async def generate(self, refs=None, resolution='2k', replies=None, model=MODEL):
         remaining = list(replies if replies is not None else [RESULT])
@@ -46,9 +55,9 @@ class SoonStudioDolaTests(unittest.IsolatedAsyncioTestCase):
                 'test prompt', '2048x2048', 'auto', model, refs, 'soonstudio', resolution=resolution,
             )
 
-    async def test_inline_and_https_images_use_official_json_edits_contract(self):
+    async def test_inline_and_https_images_use_compact_json_edits_contract(self):
         refs = [
-            {'url': 'data:' + 'image/png;base64,' + base64.b64encode(b'first image').decode(), 'kind': 'image'},
+            self.inline_png(),
             {'url': 'https://cdn.example.test/reference.png', 'kind': 'image'},
         ]
         result, _ = await self.generate(refs)
@@ -60,16 +69,35 @@ class SoonStudioDolaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.url.params['async'], 'true')
         self.assertEqual(request.headers['content-type'], 'application/json')
         body = json.loads(request.content)
-        self.assertEqual(body['images'], [ref['url'] for ref in refs])
-        self.assertEqual(body['imageUrls'], body['images'])
-        self.assertEqual(body['image'], refs[0]['url'])
-        self.assertEqual(body['imageUrl'], refs[0]['url'])
+        self.assertEqual(body['imageUrls'][1], refs[1]['url'])
+        self.assertTrue(body['imageUrls'][0].startswith("data:" + "image/jpeg;base64,"))
+        image_fields = {"image", "imageUrl", "images", "imageUrls"} & set(body)
+        self.assertEqual(image_fields, {"imageUrls"})
+        self.assertEqual(request.content.count(body['imageUrls'][0].encode()), 1)
         self.assertEqual(body['resolution'], '2k')
         self.assertEqual(body['outputFormat'], 'jpeg')
         self.assertNotIn('size', body)
         self.assertNotIn('quality', body)
         self.assertEqual(request.headers['x-studio-channel-group'], 'sd-global')
         self.assertEqual(request.headers['x-studio-request-model'], MODEL)
+
+    async def test_large_inline_reference_is_resized_and_sent_once(self):
+        size = (1800, 1200)
+        ref = self.inline_png(size=size, pixels=os.urandom(size[0] * size[1] * 3))
+        request_limit = 1024 * 1024
+        with patch.object(main, "SOONSTUDIO_SEEDREAM_MAX_REQUEST_BYTES", request_limit):
+            await self.generate([ref])
+
+        request = self.requests[0]
+        body = json.loads(request.content)
+        self.assertEqual(set(body) & {"image", "imageUrl", "images", "imageUrls"}, {"imageUrls"})
+        data_url = body['imageUrls'][0]
+        self.assertEqual(request.content.count(data_url.encode()), 1)
+        self.assertLess(len(request.content), request_limit)
+        _header, encoded = data_url.split(",", 1)
+        with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+            self.assertEqual(image.size, (1024, 683))
+            self.assertEqual(image.format, "JPEG")
 
     async def test_text_to_image_uses_generations_without_references(self):
         await self.generate([])
@@ -84,7 +112,7 @@ class SoonStudioDolaTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'reference_to_data_url', return_value=encoded) as convert, \
              patch.object(main, 'upload_local_video_to_cloud', new=AsyncMock()) as upload:
             await self.generate(refs)
-        convert.assert_called_once_with(refs[0])
+        convert.assert_called_once_with(refs[0], max_size=1536)
         upload.assert_not_awaited()
         self.assertEqual(json.loads(self.requests[0].content)['imageUrls'], [encoded])
 

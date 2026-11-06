@@ -1,22 +1,10 @@
 {
-  "version": "2026.11.06.1",
+  "version": "2026.11.06.2",
   "updated_at": "2026-11-06T00:00:00+08:00",
   "items": [
     {
-      "type": "feature",
-      "text": "新增 SoonStudio Seedream 异步文生图与图生图，支持最多 10 张参考图，并明确拒绝不支持的蒙版请求。"
-    },
-    {
-      "type": "feature",
-      "text": "支持画布内联 Base64 图片和蒙版的 OpenAI 图片编辑，并改进 SoonStudio 图片结果识别、直连交付与缓存。"
-    },
-    {
       "type": "fix",
-      "text": "优化画布任务首次轮询，并补充 SoonStudio 异步任务、模型分组和图片编辑保护的自动化测试。"
-    },
-    {
-      "type": "feature",
-      "text": "新增 macOS 服务启动、依赖安装及即梦 CLI 安装/登录脚本。"
+      "text": "修复 SoonStudio Seedream 图生图请求体过大：参考图只发送一次，自动压缩本地/内联图片，并在必要时降低尺寸。"
     }
   ]
 }

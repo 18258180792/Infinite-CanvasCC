@@ -181,7 +181,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.06.1"
+APP_VERSION = "2026.11.06.2"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -9145,6 +9145,19 @@ def compress_data_url_image(value, max_size=1536, jpeg_quality=88):
         print(f"data url image compress failed, fallback to raw: {e}")
         return value
 
+SOONSTUDIO_SEEDREAM_MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
+def soonstudio_seedream_reference_url(ref, max_size=1536):
+    value = str((ref or {}).get("url") or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    if value.startswith("data:"):
+        compressed = compress_data_url_image(value, max_size=max_size, jpeg_quality=85)
+        if compressed == value:
+            raise HTTPException(status_code=400, detail="SoonStudio Seedream 参考图无法读取或压缩，请换用有效图片。")
+        return compressed
+    return reference_to_data_url(ref, max_size=max_size)
+
 def modelscope_image_url(value, max_size=1536):
     if not value:
         return value
@@ -11898,8 +11911,6 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             )
 
         if is_soonstudio_seedream:
-            # Match SoonStudio's model-page request builder: JSON edits for
-            # references (including data URLs), JSON generations without them.
             requested_resolution = str(resolution or "").strip().lower()
             allowed_resolutions = {"1k", "2k"}
             if model.lower() == "dola-seedream-5.0-flash":
@@ -11914,8 +11925,19 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "response_format": "url",
             }
             if image_refs:
-                images = [reference_to_data_url(ref) for ref in image_refs]
-                body.update(image=images[0], imageUrl=images[0], images=images, imageUrls=images)
+                for max_size in (1536, 1024, 768):
+                    body["imageUrls"] = [
+                        soonstudio_seedream_reference_url(ref, max_size=max_size)
+                        for ref in image_refs
+                    ]
+                    body_size = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                    if body_size <= SOONSTUDIO_SEEDREAM_MAX_REQUEST_BYTES:
+                        break
+                else:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="SoonStudio Seedream 参考图总量仍过大，请减少图片数量或改用公网图片链接。",
+                    )
             headers = api_headers(provider=provider, model=model)
             try:
                 response = await client.post(edit_url if image_refs else gen_url, params={"async": "true"}, headers=headers, json=body)
