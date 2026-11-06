@@ -3,6 +3,15 @@ API/.env
 *.env
 *.env.local
 
+# Local user data
+history.json
+canvas/cowart-selection.json
+canvas/cowart-view-state.json
+data/api_providers.json
+data/conversations/
+data/projects.json
+data/prompt_libraries.json
+
 # Local Python/runtime files
 python/
 __pycache__/

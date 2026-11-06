@@ -181,7 +181,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.04.1"
+APP_VERSION = "2026.11.06.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -4129,8 +4129,11 @@ def api_headers(json_body=True, provider=None, model=""):
         headers = {"Accept": "application/json", "Authorization": bearer_auth_value(api_key)}
     if provider and model and is_soonstudio_provider(provider):
         group = (provider.get("model_groups") or {}).get(model)
+        if not group and model.lower() == "dola-seedream-5.0-flash":
+            group = "sd-global"
         if group:
             headers["x-studio-channel-group"] = group
+        headers["x-studio-request-model"] = model
     if json_body:
         headers["Content-Type"] = "application/json"
     return headers
@@ -4228,7 +4231,7 @@ def sse_event(data):
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 IMAGE_OUTPUT_KEY_HINTS = (
-    "url", "image_url", "imageUrl", "image", "output_url", "outputUrl",
+    "url", "urls", "image_url", "imageUrl", "image", "output_url", "outputUrl",
     "result_url", "resultUrl", "download_url", "downloadUrl", "asset_url", "assetUrl",
 )
 IMAGE_CONTAINER_KEY_HINTS = (
@@ -8661,6 +8664,22 @@ def convert_output_to_jpg(url, quality=88):
         print(f"转换 JPG 失败: {e}")
         return url
 
+def inline_image_edit_file(ref):
+    """Decode a canvas data URL into an OpenAI multipart image/mask file."""
+    header, separator, encoded = str(ref.get("url") or "").partition(",")
+    mime = header[5:].split(";", 1)[0].lower()
+    if not separator or not mime.startswith("image/") or not header.endswith(";base64"):
+        raise HTTPException(status_code=400, detail="参考图 data URL 格式无效，需要 Base64 图片。")
+    try:
+        content = base64.b64decode(re.sub(r"\s+", "", encoded), validate=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="参考图 Base64 数据损坏，请重新添加图片。") from exc
+    if not content:
+        raise HTTPException(status_code=400, detail="参考图内容为空，请重新添加图片。")
+    extension = mimetypes.guess_extension(mime) or ".png"
+    return ("reference" + extension, content, mime)
+
+
 def reference_to_data_url(ref, max_size=None):
     """把本地输出文件转为 data URL（base64）。max_size 限制最长边像素，避免 payload 过大。"""
     path = output_file_from_url(ref.get("url", ""))
@@ -11853,7 +11872,12 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
     is_soonstudio = is_soonstudio_provider(provider)
+    is_soonstudio_seedream = is_soonstudio and model.lower() in {"dola-seedream-5.0-flash", "seedream-v5-pro"}
     comfly_async = is_comfly_seedream_async_provider(provider, model)
+    if is_soonstudio_seedream and mask_refs:
+        raise HTTPException(status_code=400, detail="SoonStudio Seedream 的 JSON 接口未声明蒙版支持，已停止提交，避免忽略局部编辑范围。")
+    if is_soonstudio_seedream and len(image_refs) > 10:
+        raise HTTPException(status_code=400, detail="SoonStudio Seedream 最多支持 10 张参考图，请减少后重试。")
     if comfly_async and mask_refs:
         raise HTTPException(status_code=400, detail="Comfly seedream-v5-pro 的 JSON 接口未声明 mask 支持，已停止提交，避免忽略局部编辑范围。")
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or is_soonstudio or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
@@ -11873,7 +11897,31 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 files=edit_files if edit_files is not None else {},
             )
 
-        if comfly_async:
+        if is_soonstudio_seedream:
+            # Match SoonStudio's model-page request builder: JSON edits for
+            # references (including data URLs), JSON generations without them.
+            requested_resolution = str(resolution or "").strip().lower()
+            allowed_resolutions = {"1k", "2k"}
+            if model.lower() == "dola-seedream-5.0-flash":
+                allowed_resolutions.add("1.5k")
+            if requested_resolution not in allowed_resolutions:
+                requested_resolution = "2k"
+            body = {
+                "model": model,
+                "prompt": prompt,
+                "resolution": requested_resolution,
+                "outputFormat": "jpeg",
+                "response_format": "url",
+            }
+            if image_refs:
+                images = [reference_to_data_url(ref) for ref in image_refs]
+                body.update(image=images[0], imageUrl=images[0], images=images, imageUrls=images)
+            headers = api_headers(provider=provider, model=model)
+            try:
+                response = await client.post(edit_url if image_refs else gen_url, params={"async": "true"}, headers=headers, json=body)
+            except httpx.HTTPError as exc:
+                raise HTTPException(status_code=502, detail="SoonStudio 提交连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。") from exc
+        elif comfly_async:
             body = {"model": model, "prompt": prompt, "size": size, "response_format": "url"}
             if image_refs:
                 body["image"] = [reference_to_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
@@ -11983,6 +12031,9 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             edit_failed_text = ""
             try:
                 for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]:
+                    if str(ref.get("url") or "").startswith("data:"):
+                        files.append(("image", inline_image_edit_file(ref)))
+                        continue
                     path = output_file_from_url(ref.get("url", ""))
                     if not path:
                         continue
@@ -11990,6 +12041,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                     opened.append(fh)
                     files.append(("image", (os.path.basename(path), fh, content_type_for_path(path))))
                 if mask_refs:
+                    if str(mask_refs[0].get("url") or "").startswith("data:"):
+                        files.append(("mask", inline_image_edit_file(mask_refs[0])))
                     mask_path = output_file_from_url(mask_refs[0].get("url", ""))
                     if mask_path:
                         fh = open(mask_path, "rb")
@@ -14740,7 +14793,17 @@ async def build_online_image_result(payload: OnlineImageRequest):
         local_items = []
         for image_index, item in enumerate(image_items):
             name_stem = generated_image_name_stem(project_name, payload.prompt, request_index + image_index + 1)
-            local_url = await save_ai_image_to_output(item, prefix="online_", name_stem=name_stem)
+            remote_url = str(item.get("value") or "")
+            remote_scheme = urllib.parse.urlsplit(remote_url).scheme.lower()
+            if (
+                is_soonstudio_provider(provider)
+                and item.get("type") == "url"
+                and remote_scheme in {"http", "https"}
+            ):
+                local_url = remote_url
+                schedule_remote_generated_image_cache(local_url)
+            else:
+                local_url = await save_ai_image_to_output(item, prefix="online_", name_stem=name_stem)
             if local_url:
                 local_urls.append(local_url)
                 meta = image_output_meta(local_url, item)

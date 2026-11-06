@@ -17190,7 +17190,7 @@ async function pollSmartCanvasTask(taskId){
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
         for(let i = 0; i < 900; i++){
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            if(i > 0) await new Promise(resolve => setTimeout(resolve, 2000));
             const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`).then(async r => {
                 if(!r.ok) throw new Error(await r.text());
                 return r.json();
