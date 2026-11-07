@@ -181,7 +181,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.06.2"
+APP_VERSION = "2026.11.07.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -9978,15 +9978,16 @@ def generated_image_name_stem(project_name, prompt, index=1):
 
 async def save_ai_image_to_output(image_data, prefix="online_", category="output", name_stem=""):
     stem = sanitize_export_filename(name_stem, "") if name_stem else ""
-    filename = f"{stem or (prefix + uuid.uuid4().hex[:10])}.png"
+    filename_stem = stem or (prefix + uuid.uuid4().hex[:10])
+    filename = f"{filename_stem}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
         mime_type = str(image_data.get("mime_type") or "").lower()
         if "jpeg" in mime_type or "jpg" in mime_type:
-            filename = filename[:-4] + ".jpg"
+            filename = f"{filename_stem}.jpg"
             path = output_path_for(filename, category)
         elif "webp" in mime_type:
-            filename = filename[:-4] + ".webp"
+            filename = f"{filename_stem}.webp"
             path = output_path_for(filename, category)
         with open(path, "wb") as f:
             f.write(base64.b64decode(image_data["value"]))
@@ -9995,7 +9996,33 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
     if value.startswith("/output/") or value.startswith("/assets/"):
         return value
     value = rewrite_runninghub_file_url(value)
+
+    def copy_cached_image(cached_path):
+        extension = os.path.splitext(cached_path)[1].lower()
+        if extension not in REMOTE_IMAGE_CACHE_EXTS:
+            extension = ".png"
+        cached_filename = f"{filename_stem}{extension}"
+        cached_output_path = output_path_for(cached_filename, category)
+        os.makedirs(os.path.dirname(cached_output_path), exist_ok=True)
+        temp_path = f"{cached_output_path}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copyfile(cached_path, temp_path)
+            os.replace(temp_path, cached_output_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        return output_url_for(cached_filename, category)
+
     try:
+        _cache_root, _cache_key, cached_path = remote_image_cache_location(value)
+        if cached_path:
+            try:
+                with Image.open(cached_path) as cached_image:
+                    cached_image.verify()
+                return await asyncio.to_thread(copy_cached_image, cached_path)
+            except Exception:
+                pass
+
         timeout = httpx.Timeout(connect=4.0, read=6.0, write=8.0, pool=4.0)
         media_url = urllib.parse.urlsplit(value)
         soonstudio_media = media_url.hostname == "soonstudio.ai" and media_url.path.startswith("/api/media/")
@@ -10004,24 +10031,30 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                 httpx_request_with_transient_retries(
                     client, "GET", value, attempts=2, retry_delay=0.35
                 ),
-                timeout=8.0,
+                timeout=5.0,
             )
             response.raise_for_status()
             if not response.content:
                 schedule_remote_generated_image_cache(value)
                 return value
-            content_type = response.headers.get("Content-Type", "")
-            if "jpeg" in content_type or "jpg" in content_type:
-                filename = filename[:-4] + ".jpg"
-                path = output_path_for(filename, category)
-            elif "webp" in content_type:
-                filename = filename[:-4] + ".webp"
-                path = output_path_for(filename, category)
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            extension = REMOTE_IMAGE_CACHE_MIME_EXTS.get(content_type)
+            if not extension:
+                remote_extension = os.path.splitext(urllib.parse.urlsplit(value).path)[1].lower()
+                extension = remote_extension if remote_extension in REMOTE_IMAGE_CACHE_EXTS else ".png"
+            filename = f"{filename_stem}{extension}"
+            path = output_path_for(filename, category)
             with open(path, "wb") as f:
                 f.write(response.content)
             return output_url_for(filename, category)
     except Exception as e:
-        print(f"保存上游图片失败: {e}; url={value}")
+        media_url = urllib.parse.urlsplit(value)
+        LOG.warning(
+            "generated_image_local_save_fallback host=%s source=%s error_type=%s",
+            media_url.hostname or "unknown",
+            filename_from_media_url(value, "unknown"),
+            type(e).__name__,
+        )
         schedule_remote_generated_image_cache(value)
         return value
 
@@ -14815,17 +14848,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         local_items = []
         for image_index, item in enumerate(image_items):
             name_stem = generated_image_name_stem(project_name, payload.prompt, request_index + image_index + 1)
-            remote_url = str(item.get("value") or "")
-            remote_scheme = urllib.parse.urlsplit(remote_url).scheme.lower()
-            if (
-                is_soonstudio_provider(provider)
-                and item.get("type") == "url"
-                and remote_scheme in {"http", "https"}
-            ):
-                local_url = remote_url
-                schedule_remote_generated_image_cache(local_url)
-            else:
-                local_url = await save_ai_image_to_output(item, prefix="online_", name_stem=name_stem)
+            local_url = await save_ai_image_to_output(item, prefix="online_", name_stem=name_stem)
             if local_url:
                 local_urls.append(local_url)
                 meta = image_output_meta(local_url, item)

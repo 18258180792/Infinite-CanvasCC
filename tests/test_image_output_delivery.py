@@ -70,7 +70,7 @@ class ImageOutputDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved_path.read_bytes(), content)
         self.assertTrue(url.startswith("/assets/output/"))
 
-    async def test_remote_image_retries_transient_gateway_error_then_caches(self):
+    async def test_remote_image_retries_transient_gateway_error_then_saves_local_file(self):
         source_url = "https://images.example.test/result.png"
         request = httpx.Request("GET", source_url)
         client = StubAsyncClient([
@@ -90,6 +90,22 @@ class ImageOutputDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(url.startswith("/assets/output/"))
         self.assertEqual((self.output / Path(url).name).read_bytes(), b"remote-image-bytes")
 
+    async def test_remote_image_uses_existing_local_cache_without_network(self):
+        source_url = "https://images.example.test/result.jpg"
+        cache_root, cache_key, _cached_path = main.remote_image_cache_location(source_url)
+        cached_path = Path(cache_root) / f"{cache_key}.jpg"
+        cached_path.parent.mkdir(parents=True)
+        Image.new("RGB", (1, 1), (20, 40, 60)).save(cached_path, format="JPEG")
+
+        with patch.object(main.httpx, "AsyncClient") as client_factory:
+            url = await main.save_ai_image_to_output({"type": "url", "value": source_url})
+
+        client_factory.assert_not_called()
+        self.assertTrue(url.startswith("/assets/output/"))
+        output_path = self.output / Path(url).name
+        with Image.open(output_path) as image:
+            self.assertEqual(image.size, (1, 1))
+
     async def test_remote_image_falls_back_to_source_after_cache_attempts_fail(self):
         source_url = "https://images.example.test/result.png"
         request = httpx.Request("GET", source_url)
@@ -100,7 +116,6 @@ class ImageOutputDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(main.httpx, "AsyncClient", return_value=client),
-            patch("builtins.print"),
             patch.object(main, "schedule_remote_generated_image_cache") as schedule,
         ):
             url = await main.save_ai_image_to_output({"type": "url", "value": source_url})

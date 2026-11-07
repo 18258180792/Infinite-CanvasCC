@@ -31,7 +31,7 @@ class SoonStudioCanvasDeliveryTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(main.extract_images(urls_only), [{"type": "url", "value": IMAGE_URL}])
 
-    async def test_success_url_returns_without_waiting_for_image_download(self):
+    async def test_successful_task_uses_source_url_if_local_copy_is_unavailable(self):
         provider = {
             "id": "soonstudio",
             "name": "SoonStudio",
@@ -47,15 +47,15 @@ class SoonStudioCanvasDeliveryTests(unittest.IsolatedAsyncioTestCase):
         image = {"type": "url", "value": IMAGE_URL}
         raw = {"data": [{"url": IMAGE_URL}]}
         task_state = {"task-1": {"status": "queued"}}
-        cache_task = asyncio.create_task(asyncio.Event().wait())
+        local_save = AsyncMock(return_value=IMAGE_URL)
 
         with (
             patch.object(main, "get_api_provider", return_value=provider),
             patch.object(main, "generated_image_project_name", return_value="Project"),
             patch.object(main, "generated_image_name_stem", return_value="Project_test"),
             patch.object(main, "generate_ai_image", new=AsyncMock(return_value=(image, raw))),
-            patch.object(main, "schedule_remote_generated_image_cache", return_value=cache_task) as schedule_cache,
-            patch.object(main, "save_ai_image_to_output", new=AsyncMock()) as save_image,
+            patch.object(main, "schedule_remote_generated_image_cache") as schedule_cache,
+            patch.object(main, "save_ai_image_to_output", new=local_save),
             patch.object(main, "save_to_history", new=Mock()),
             patch.object(main, "GLOBAL_LOOP", None),
             patch.object(main, "CANVAS_TASKS", task_state),
@@ -66,14 +66,10 @@ class SoonStudioCanvasDeliveryTests(unittest.IsolatedAsyncioTestCase):
         result = task_state["task-1"]["result"]
         self.assertEqual(result["images"], [IMAGE_URL])
         self.assertEqual(result["image_items"][0]["url"], IMAGE_URL)
-        schedule_cache.assert_called_once_with(IMAGE_URL)
-        save_image.assert_not_awaited()
-        self.assertFalse(cache_task.done())
-        cache_task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await cache_task
+        local_save.assert_awaited_once_with(image, prefix="online_", name_stem="Project_test")
+        schedule_cache.assert_not_called()
 
-    async def test_other_providers_keep_waiting_for_local_image_save(self):
+    async def test_other_providers_use_local_output_when_available(self):
         provider = {
             "id": "other",
             "name": "Other",
