@@ -56,9 +56,11 @@ function canvasDirectFirstImageUrl(url, name=''){
 function canvasMediaPreviewUrl(url, size=512){
     const raw = canvasOriginalMediaUrl(url);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')){
-        return isVideoUrl(raw) ? canvasDisplayMediaUrl(raw) : canvasDirectFirstImageUrl(raw);
+    if(/^https?:\/\//i.test(raw) && !isVideoUrl(raw)){
+        const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
+        return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
     }
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/') && !raw.startsWith('/api/storage-files/')) return canvasDisplayMediaUrl(raw);
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv|flv)(\?|#|$)/i.test(raw)) return raw;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
@@ -373,6 +375,9 @@ let dragBoard = null;
 let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
+let minimapNodeUpdateQueued = false;
+let minimapNodeElements = new Map();
+let minimapDirtyNodeIds = new Set();
 let linksRenderQueued = false;
 let nodeElementCache = new Map();
 let dragFrameQueued = false;
@@ -1212,7 +1217,7 @@ function screenToWorld(clientX, clientY){
 }
 function applyViewport(){
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
-    scheduleMinimapRender();
+    updateMinimapViewport();
     scheduleCanvasImageResolutionSync(nodesEl, 120);
 }
 function estimatedNodeRect(n){
@@ -1254,6 +1259,21 @@ function scheduleMinimapRender(){
         renderMinimap();
     });
 }
+function scheduleMinimapNodeUpdate(ids=[]){
+    (ids || []).forEach(id => id && minimapDirtyNodeIds.add(id));
+    if(minimapRenderQueued || minimapNodeUpdateQueued) return;
+    minimapNodeUpdateQueued = true;
+    requestAnimationFrame(() => {
+        minimapNodeUpdateQueued = false;
+        if(minimapRenderQueued){
+            minimapDirtyNodeIds.clear();
+            return;
+        }
+        const dirtyIds = [...minimapDirtyNodeIds];
+        minimapDirtyNodeIds.clear();
+        updateMinimapNodes(dirtyIds);
+    });
+}
 // 拖动/缩放节点时每个 mousemove 都全量重建连线 SVG 会掉帧；用 rAF 合并成每帧最多刷新一次。
 function scheduleLinksRender(){
     if(linksRenderQueued) return;
@@ -1277,20 +1297,56 @@ function renderMinimap(){
     minimapState = {bounds, scale, ox, oy, cw, ch};
     const nodeHtml = (nodes || []).map(n => {
         const r = estimatedNodeRect(n);
-        return `<div class="minimap-node ${selected.has(n.id) ? 'selected' : ''}" style="left:${ox + (r.x - bounds.x) * scale}px;top:${oy + (r.y - bounds.y) * scale}px;width:${Math.max(3, r.w * scale)}px;height:${Math.max(3, r.h * scale)}px"></div>`;
+        return `<div class="minimap-node ${selected.has(n.id) ? 'selected' : ''}" data-node-id="${escapeAttr(n.id)}" style="left:${ox + (r.x - bounds.x) * scale}px;top:${oy + (r.y - bounds.y) * scale}px;width:${Math.max(3, r.w * scale)}px;height:${Math.max(3, r.h * scale)}px"></div>`;
     }).join('');
     minimapContent.innerHTML = `${nodeHtml}${nodes?.length ? '' : '<div class="minimap-empty">EMPTY</div>'}<div id="minimapViewport" class="minimap-viewport"></div>`;
     minimapViewport = document.getElementById('minimapViewport');
+    minimapNodeElements = new Map([...minimapContent.querySelectorAll('.minimap-node[data-node-id]')].map(el => [el.dataset.nodeId, el]));
     updateMinimapViewport();
 }
 function updateMinimapViewport(){
-    if(!minimapViewport || !minimapState) return;
+    if(!minimapViewport || !minimapState){
+        scheduleMinimapRender();
+        return;
+    }
     const r = currentWorldViewRect();
     const {bounds, scale, ox, oy} = minimapState;
+    if(r.x < bounds.x || r.y < bounds.y || r.x + r.w > bounds.x + bounds.w || r.y + r.h > bounds.y + bounds.h){
+        scheduleMinimapRender();
+        return;
+    }
     minimapViewport.style.left = `${ox + (r.x - bounds.x) * scale}px`;
     minimapViewport.style.top = `${oy + (r.y - bounds.y) * scale}px`;
     minimapViewport.style.width = `${Math.max(8, r.w * scale)}px`;
     minimapViewport.style.height = `${Math.max(8, r.h * scale)}px`;
+}
+function updateMinimapNodes(ids=[]){
+    if(!minimapState){
+        scheduleMinimapRender();
+        return;
+    }
+    const {bounds, scale, ox, oy} = minimapState;
+    let needsRender = false;
+    for(const id of ids){
+        const node = nodes.find(item => item.id === id);
+        const el = minimapNodeElements.get(id);
+        if(!node || !el){
+            needsRender = true;
+            break;
+        }
+        const r = estimatedNodeRect(node);
+        if(r.x < bounds.x || r.y < bounds.y || r.x + r.w > bounds.x + bounds.w || r.y + r.h > bounds.y + bounds.h){
+            needsRender = true;
+            break;
+        }
+        el.classList.toggle('selected', selected.has(id));
+        el.style.left = `${ox + (r.x - bounds.x) * scale}px`;
+        el.style.top = `${oy + (r.y - bounds.y) * scale}px`;
+        el.style.width = `${Math.max(3, r.w * scale)}px`;
+        el.style.height = `${Math.max(3, r.h * scale)}px`;
+    }
+    if(needsRender) scheduleMinimapRender();
+    else updateMinimapViewport();
 }
 function minimapEventToWorld(e){
     if(!minimapState) renderMinimap();
@@ -5981,6 +6037,7 @@ function render(){
     measureCanvasOriginalImageNodes(nodesEl);
     nodeElementCache = new Map([...nodesEl.querySelectorAll('.node')].map(el => [el.dataset.id, el]));
     refreshOutputTimer();
+    scheduleMinimapRender();
 }
 function refreshNodes(ids=[]){
     const uniqueIds = [...new Set((ids || []).filter(Boolean))];
@@ -6013,6 +6070,7 @@ function refreshNodes(ids=[]){
     measureCanvasOriginalImageNodes(nodesEl);
     nodeElementCache = new Map([...nodesEl.querySelectorAll('.node')].map(el => [el.dataset.id, el]));
     refreshOutputTimer();
+    scheduleMinimapRender();
 }
 function refreshRunNodes(node, out=null){
     refreshNodes([node?.id, out?.id]);
@@ -15159,6 +15217,35 @@ function startNodeDrag(e, node){
     window.addEventListener('mousemove', onNodeDrag, true);
     window.addEventListener('mouseup', endDrag, true);
 }
+function applyCanvasNodeDrag(event){
+    if(!dragNode || !event) return;
+    const dx = (event.clientX - dragNode.sx) / viewport.scale;
+    const dy = (event.clientY - dragNode.sy) / viewport.scale;
+    dragNode.node.x = dragNode.ox + dx;
+    dragNode.node.y = dragNode.oy + dy;
+    const movedIds = [dragNode.node.id];
+    const el = nodeElementCache.get(dragNode.node.id) || nodesEl.querySelector(`.node[data-id="${dragNode.node.id}"]`);
+    if(el){
+        nodeElementCache.set(dragNode.node.id, el);
+        el.style.left = `${dragNode.node.x}px`;
+        el.style.top = `${dragNode.node.y}px`;
+    }
+    (dragNode.children || []).forEach(childDrag => {
+        childDrag.node.x = childDrag.ox + dx;
+        childDrag.node.y = childDrag.oy + dy;
+        movedIds.push(childDrag.node.id);
+        const childEl = nodeElementCache.get(childDrag.node.id) || nodesEl.querySelector(`.node[data-id="${childDrag.node.id}"]`);
+        if(childEl){
+            nodeElementCache.set(childDrag.node.id, childEl);
+            childEl.style.left = `${childDrag.node.x}px`;
+            childEl.style.top = `${childDrag.node.y}px`;
+        }
+    });
+    renderLinks();
+    renderSelectionHub();
+    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
+    updateMinimapNodes(movedIds);
+}
 function onNodeDrag(e){
     if(!dragNode) return;
     pendingDragEvent = e;
@@ -15168,31 +15255,7 @@ function onNodeDrag(e){
         dragFrameQueued = false;
         const event = pendingDragEvent;
         pendingDragEvent = null;
-        if(!dragNode || !event) return;
-        const dx = (event.clientX - dragNode.sx) / viewport.scale;
-        const dy = (event.clientY - dragNode.sy) / viewport.scale;
-        dragNode.node.x = dragNode.ox + dx;
-        dragNode.node.y = dragNode.oy + dy;
-        const el = nodeElementCache.get(dragNode.node.id) || nodesEl.querySelector(`.node[data-id="${dragNode.node.id}"]`);
-        if(el){
-            nodeElementCache.set(dragNode.node.id, el);
-            el.style.left = `${dragNode.node.x}px`;
-            el.style.top = `${dragNode.node.y}px`;
-        }
-        (dragNode.children || []).forEach(childDrag => {
-            childDrag.node.x = childDrag.ox + dx;
-            childDrag.node.y = childDrag.oy + dy;
-            const childEl = nodeElementCache.get(childDrag.node.id) || nodesEl.querySelector(`.node[data-id="${childDrag.node.id}"]`);
-            if(childEl){
-                nodeElementCache.set(childDrag.node.id, childEl);
-                childEl.style.left = `${childDrag.node.x}px`;
-                childEl.style.top = `${childDrag.node.y}px`;
-            }
-        });
-        renderLinks();
-        renderSelectionHub();
-        if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
-        scheduleMinimapRender();
+        applyCanvasNodeDrag(event);
     });
 }
 function startNodeResize(e, node){
@@ -15226,7 +15289,7 @@ function onNodeResize(e){
     }
     scheduleLinksRender();
     renderSelectionHub();
-    scheduleMinimapRender();
+    scheduleMinimapNodeUpdate([resizeNode.node.id]);
 }
 function startLink(e, originId, originKind){
     e.stopPropagation();
@@ -15343,6 +15406,13 @@ function sanitizeConnections(){
     connections = (connections || []).filter(c => canConnect(c.from, c.to));
 }
 function endDrag(event=null){
+    if(dragNode && event){
+        pendingDragEvent = event;
+        dragFrameQueued = false;
+        const finalDragEvent = pendingDragEvent;
+        pendingDragEvent = null;
+        applyCanvasNodeDrag(finalDragEvent);
+    }
     const hadContentDrag = Boolean(dragNode || resizeNode || llmPaneDrag || knifeChanged || tempLink);
     const hadViewportDrag = Boolean(dragBoard || minimapDrag);
     if(dragNode){

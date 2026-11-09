@@ -142,7 +142,13 @@ let suppressImageClickUntil = 0;
 let lastMouseWorld = null;
 let lastConfigRefreshAt = 0;
 let smartMinimapState = null;
+let smartMinimapNodes = new Map();
 let smartMinimapDrag = false;
+let smartDragMoveRaf = 0;
+let pendingSmartDragPointer = null;
+let dropHighlightId = '';
+let dropHighlightEl = null;
+let connectionEventsBound = false;
 let zoomPreviewState = null;
 let runTimerInterval = null;
 let smartCascadeRunning = false;
@@ -307,7 +313,7 @@ let panoramaState = {
     loadToken:0
 };
 window.__smartCanvasPanoramaState = panoramaState;
-let viewport = {x:0, y:0, scale:1};
+let viewport = {x:0, y:0, scale:0.45};
 let settings = {
     engine:'api',
     apiKind:'image',
@@ -484,7 +490,11 @@ function smartMediaPreviewUrl(itemOrUrl, size=512){
     const displayItem = typeof itemOrUrl === 'object' && itemOrUrl ? {...itemOrUrl, url:raw} : raw;
     const displayUrl = displayMediaUrl(displayItem);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return outputUrlLooksVideo(raw) ? displayUrl : raw;
+    if(/^https?:\/\//i.test(raw) && !outputUrlLooksVideo(raw)){
+        const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
+        return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
+    }
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/') && !raw.startsWith('/api/storage-files/')) return displayUrl;
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv)(\?|#|$)/i.test(raw)) return displayUrl;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
@@ -492,7 +502,7 @@ function smartMediaPreviewUrl(itemOrUrl, size=512){
 function smartPreviewImgHtml(itemOrUrl, size=512, attrs=''){
     const original = smartOriginalMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
-    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
+    return `<img loading="lazy" decoding="async" src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
 }
 function loadSmartOriginalImageDimensions(url){
     const src = displayMediaUrl({url:smartOriginalMediaUrl(url)});
@@ -2101,6 +2111,20 @@ function arrangeSelectedSmartNodes(){
     scheduleSave();
     toast('已整理选中节点');
 }
+function connectionGeometry(fromNode, toNode, kind){
+    const fr = nodeRect(fromNode), tr = nodeRect(toNode);
+    const isHistory = kind === 'history';
+    const fx = isHistory ? fr.x + fr.width / 2 : fr.x + fr.width;
+    const fy = isHistory ? fr.y + fr.height : fr.y + fr.height / 2;
+    const tx = isHistory ? tr.x + tr.width / 2 : tr.x;
+    const ty = isHistory ? tr.y : tr.y + tr.height / 2;
+    const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
+    const dy = Math.max(36, Math.abs(ty - fy) * 0.45);
+    const curve = isHistory
+        ? `M${fx} ${fy} C ${fx} ${fy+dy}, ${tx} ${ty-dy}, ${tx} ${ty}`
+        : `M${fx} ${fy} C ${fx+dx} ${fy}, ${tx-dx} ${ty}, ${tx} ${ty}`;
+    return {fx, fy, tx, ty, curve, mx:(fx + tx) / 2, my:(fy + ty) / 2};
+}
 function applyViewport(){
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
     // world 被 transform:scale 缩放后，其内部带 backdrop-filter 的卡片（参数设置/合成卡等）
@@ -2110,7 +2134,7 @@ function applyViewport(){
     world.classList.toggle('canvas-scaled', Math.abs(viewport.scale - 1) > 0.001);
     shell.style.backgroundSize = '24px 24px';
     shell.style.backgroundPosition = '0 0';
-    renderMinimap();
+    updateSmartMinimapViewport();
     scheduleSmartImageResolutionSync(world, 120);
 }
 function screenToWorld(event){
@@ -2135,29 +2159,79 @@ function renderMinimap(){
     const viewH = shell.clientHeight / viewport.scale;
     const viewX = -viewport.x / viewport.scale;
     const viewY = -viewport.y / viewport.scale;
-    const rects = nodes.filter(n => n.id !== SMART_LOG_PREVIEW_NODE_ID).map(nodeRect);
+    const minimapNodes = nodes.filter(n => n.id !== SMART_LOG_PREVIEW_NODE_ID);
+    const rects = minimapNodes.map(nodeRect);
     rects.push({x:viewX, y:viewY, width:viewW, height:viewH});
-    const minX = Math.min(...rects.map(r => r.x), -200);
-    const minY = Math.min(...rects.map(r => r.y), -200);
+    const minX = Math.min(...rects.map(r => r.x), viewX - 200, -200);
+    const minY = Math.min(...rects.map(r => r.y), viewY - 200, -200);
     const maxX = Math.max(...rects.map(r => r.x + r.width), viewX + viewW + 200);
     const maxY = Math.max(...rects.map(r => r.y + r.height), viewY + viewH + 200);
     const scale = Math.min(width / Math.max(1, maxX - minX), height / Math.max(1, maxY - minY));
     const offsetX = (width - (maxX - minX) * scale) / 2;
     const offsetY = (height - (maxY - minY) * scale) / 2;
-    smartMinimapState = {minX, minY, scale, offsetX, offsetY, width, height};
+    smartMinimapState = {minX, minY, maxX, maxY, scale, offsetX, offsetY, width, height};
     const project = r => ({
         left:offsetX + (r.x - minX) * scale,
         top:offsetY + (r.y - minY) * scale,
         width:Math.max(4, r.width * scale),
         height:Math.max(4, r.height * scale)
     });
-    const nodeHtml = rects.slice(0, -1).map(r => {
+    const nodeHtml = minimapNodes.map((node, index) => {
+        const r = rects[index];
         const p = project(r);
-        return `<div class="minimap-node" style="left:${p.left}px;top:${p.top}px;width:${p.width}px;height:${p.height}px"></div>`;
+        return `<div class="minimap-node" data-node-id="${escapeAttr(node.id)}" style="left:${p.left}px;top:${p.top}px;width:${p.width}px;height:${p.height}px"></div>`;
     }).join('');
     const view = project({x:viewX, y:viewY, width:viewW, height:viewH});
     minimapContent.innerHTML = `${nodeHtml}<div id="minimapViewport" class="smart-minimap-viewport" style="left:${view.left}px;top:${view.top}px;width:${view.width}px;height:${view.height}px"></div>`;
     minimapViewport = document.getElementById('minimapViewport');
+    smartMinimapNodes = new Map([...minimapContent.querySelectorAll('.minimap-node[data-node-id]')].map(el => [el.dataset.nodeId, el]));
+}
+function updateSmartMinimapViewport(){
+    if(!minimapContent || !minimapViewport || !smartMinimapState){
+        renderMinimap();
+        return;
+    }
+    const viewW = shell.clientWidth / viewport.scale;
+    const viewH = shell.clientHeight / viewport.scale;
+    const viewX = -viewport.x / viewport.scale;
+    const viewY = -viewport.y / viewport.scale;
+    const state = smartMinimapState;
+    if(viewX < state.minX || viewY < state.minY || viewX + viewW > state.maxX || viewY + viewH > state.maxY){
+        renderMinimap();
+        return;
+    }
+    minimapViewport.style.left = `${state.offsetX + (viewX - state.minX) * state.scale}px`;
+    minimapViewport.style.top = `${state.offsetY + (viewY - state.minY) * state.scale}px`;
+    minimapViewport.style.width = `${Math.max(4, viewW * state.scale)}px`;
+    minimapViewport.style.height = `${Math.max(4, viewH * state.scale)}px`;
+}
+function updateSmartMinimapNodes(ids=[]){
+    if(!smartMinimapState){
+        renderMinimap();
+        return;
+    }
+    const state = smartMinimapState;
+    let needsRender = false;
+    for(const id of ids){
+        if(id === SMART_LOG_PREVIEW_NODE_ID) continue;
+        const node = nodes.find(item => item.id === id);
+        const el = smartMinimapNodes.get(id);
+        if(!node || !el){
+            needsRender = true;
+            break;
+        }
+        const rect = nodeRect(node);
+        if(rect.x < state.minX || rect.y < state.minY || rect.x + rect.width > state.maxX || rect.y + rect.height > state.maxY){
+            needsRender = true;
+            break;
+        }
+        el.style.left = `${state.offsetX + (rect.x - state.minX) * state.scale}px`;
+        el.style.top = `${state.offsetY + (rect.y - state.minY) * state.scale}px`;
+        el.style.width = `${Math.max(4, rect.width * state.scale)}px`;
+        el.style.height = `${Math.max(4, rect.height * state.scale)}px`;
+    }
+    if(needsRender) renderMinimap();
+    else updateSmartMinimapViewport();
 }
 function minimapEventToWorld(event){
     if(!smartMinimapState) renderMinimap();
@@ -6415,9 +6489,9 @@ function renderConnections(){
         const fromNode = nodes.find(n => n.id === item.from);
         const toNode = nodes.find(n => n.id === item.toId);
         if(!fromNode || !toNode) return '';
-        const fr = nodeRect(fromNode), tr = nodeRect(toNode);
         const kind = item.kind;
         const isHistory = kind === 'history';
+        const {tx, ty, curve, mx, my} = connectionGeometry(fromNode, toNode, kind);
         const dataIndex = item.indices.join(',');
         const isInsertPreview = item.indices.some(i => loopInsertPreview?.index === i);
         const edgeKeys = item.targets.map(t => `${item.from}->${t}`);
@@ -6429,16 +6503,7 @@ function renderConnections(){
         const isCascade = !isHistory && (edgeKeys.some(k => cascadeKeys.has(k)) || Boolean(cascadeState) || isInsertPreview);
         const isPendingLine = !isCascade && item.targets.some(t => nodes.find(n => n.id === t)?.pending);
         const isSelectedLine = selectedConnIds.size > 0 && (selectedConnIds.has(item.from) || selectedConnIds.has(item.toId) || item.targets.some(t => selectedConnIds.has(t)));
-        const fx = isHistory ? fr.x + fr.width / 2 : fr.x + fr.width;
-        const fy = isHistory ? fr.y + fr.height : fr.y + fr.height / 2;
-        const tx = isHistory ? tr.x + tr.width / 2 : tr.x;
-        const ty = isHistory ? tr.y : tr.y + tr.height / 2;
-        const dx = Math.max(50, Math.abs(tx - fx) * 0.45);
-        const dy = Math.max(36, Math.abs(ty - fy) * 0.45);
-        const curve = isHistory
-            ? `M${fx} ${fy} C ${fx} ${fy+dy}, ${tx} ${ty-dy}, ${tx} ${ty}`
-            : `M${fx} ${fy} C ${fx+dx} ${fy}, ${tx-dx} ${ty}, ${tx} ${ty}`;
-        const mx = (fx + tx) / 2, my = (fy + ty) / 2;
+        const geometryAttrs = `data-geometry-from="${escapeAttr(item.from)}" data-geometry-to="${escapeAttr(item.toId)}" data-geometry-kind="${escapeAttr(kind)}"`;
         const cls = [
             isPendingLine ? 'conn-pending' : '',
             isCascade ? 'conn-cascade' : '',
@@ -6451,14 +6516,46 @@ function renderConnections(){
         const color = isCascade ? '#16a34a' : isHistory ? 'rgba(100,116,139,0.46)' : kind === 'input' ? 'rgba(100,116,139,0.62)' : 'rgba(148,163,184,0.62)';
         const opacity = isPendingLine ? '.82' : '1';
         const width = kind === 'input' ? '1.9' : '1.6';
-        return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
+        return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" ${geometryAttrs} d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" ${geometryAttrs} d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" ${geometryAttrs} cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" ${geometryAttrs} transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
     }).join('');
     return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
+}
+function updateConnectionGeometry(nodeIds=[]){
+    if(!nodeIds.length) return;
+    const svg = world.querySelector('svg.connection-layer');
+    if(!svg) return;
+    const wanted = new Set(nodeIds);
+    const items = new Map();
+    svg.querySelectorAll('[data-geometry-from][data-geometry-to]').forEach(el => {
+        const fromId = el.dataset.geometryFrom;
+        const toId = el.dataset.geometryTo;
+        if(!wanted.has(fromId) && !wanted.has(toId)) return;
+        const kind = el.dataset.geometryKind || 'flow';
+        const key = `${fromId}|${toId}|${kind}`;
+        if(!items.has(key)) items.set(key, {fromId, toId, kind, elements:[]});
+        items.get(key).elements.push(el);
+    });
+    items.forEach(item => {
+        const fromNode = nodes.find(n => n.id === item.fromId);
+        const toNode = nodes.find(n => n.id === item.toId);
+        if(!fromNode || !toNode) return;
+        const geometry = connectionGeometry(fromNode, toNode, item.kind);
+        item.elements.forEach(el => {
+            if(el.tagName.toLowerCase() === 'path') el.setAttribute('d', geometry.curve);
+            else if(el.classList.contains('conn-end')){
+                el.setAttribute('cx', geometry.tx);
+                el.setAttribute('cy', geometry.ty);
+            } else if(el.classList.contains('conn-cut')){
+                el.setAttribute('transform', `translate(${geometry.mx} ${geometry.my})`);
+            }
+        });
+    });
 }
 function refreshConnectionLayer(){
     connectionLayerRaf = 0;
     const oldSvg = world.querySelector('svg.connection-layer');
     if(!oldSvg) return;
+    if(!(canvas?.connections || []).length && !oldSvg.querySelector('[data-conn-index]')) return;
     const tpl = document.createElement('template');
     tpl.innerHTML = renderConnections().trim();
     const nextSvg = tpl.content.firstElementChild;
@@ -6466,18 +6563,34 @@ function refreshConnectionLayer(){
     bindConnectionEvents();
 }
 function scheduleConnectionLayerRefresh(){
+    if(interactionLayerRaf){
+        interactionLayerFullRefresh = true;
+        return;
+    }
     if(connectionLayerRaf) return;
     connectionLayerRaf = requestAnimationFrame(refreshConnectionLayer);
 }
 let interactionLayerRaf = 0;
-// 拖动/缩放节点时，每个 mousemove 都全量重建连线 SVG + 小地图会掉帧；
-// 用 requestAnimationFrame 把它们合并成每帧最多刷新一次（节点本身的位移仍是即时的）。
-function scheduleInteractionLayerRefresh(){
+let interactionLayerFullRefresh = false;
+const interactionMinimapNodeIds = new Set();
+function scheduleInteractionLayerRefresh(nodeIds=[]){
+    (nodeIds || []).forEach(id => id && interactionMinimapNodeIds.add(id));
+    if(connectionLayerRaf){
+        cancelAnimationFrame(connectionLayerRaf);
+        connectionLayerRaf = 0;
+        interactionLayerFullRefresh = true;
+    }
     if(interactionLayerRaf) return;
     interactionLayerRaf = requestAnimationFrame(() => {
         interactionLayerRaf = 0;
-        refreshConnectionLayer();
-        renderMinimap();
+        const fullRefresh = interactionLayerFullRefresh;
+        interactionLayerFullRefresh = false;
+        const ids = [...interactionMinimapNodeIds];
+        interactionMinimapNodeIds.clear();
+        if(fullRefresh) refreshConnectionLayer();
+        else updateConnectionGeometry(ids);
+        if(ids.length) updateSmartMinimapNodes(ids);
+        else updateSmartMinimapViewport();
     });
 }
 function moveNodeElementsDuringDrag(){
@@ -6495,7 +6608,7 @@ function moveNodeElementsDuringDrag(){
     if(active && (dragState.group || [{id:dragState.id}]).some(item => item.id === active.id)){
         positionComposerForNode(active);
     }
-    scheduleInteractionLayerRefresh();
+    scheduleInteractionLayerRefresh(groupItems.map(item => item.id));
 }
 function updateNodeElementDuringResize(node){
     if(!node) return;
@@ -6557,7 +6670,7 @@ function updateNodeElementDuringResize(node){
     }
     const active = selectedNode();
     if(active?.id === node.id) positionComposerForNode(active);
-    scheduleInteractionLayerRefresh();
+    scheduleInteractionLayerRefresh([node.id]);
 }
 function syncSmartGroupMemberElements(group){
     if(!isSmartGroupNode(group)) return;
@@ -6849,6 +6962,7 @@ function transplantSmartMediaElements(oldNodeEl, newNodeEl){
             oldMedia.alt = newMedia.getAttribute('alt') || oldMedia.getAttribute('alt') || '';
             oldMedia.style.cssText = newMedia.style.cssText;
             oldMedia.dataset.originalSrc = newMedia.dataset?.originalSrc || oldMedia.dataset?.originalSrc || '';
+            oldMedia.dataset.previewSrc = newMedia.dataset?.previewSrc || oldMedia.dataset?.previewSrc || '';
             newMedia.replaceWith(oldMedia);
             return;
         }
@@ -6976,7 +7090,9 @@ function bindImageProxyFallback(imgEl, itemOrUrl){
         delete imgEl.dataset.proxyFallbackTried;
         delete imgEl.dataset.imageDeliveryState;
     };
-    directTimer = setTimeout(useProxy, 5000);
+    if(!imgEl.dataset.previewSrc?.startsWith('/api/media-preview?')){
+        directTimer = setTimeout(useProxy, 5000);
+    }
     if(imgEl.complete){
         if(imgEl.naturalWidth > 0) onLoad();
         else useProxy();
@@ -8694,18 +8810,19 @@ function measureSmartNodeImages(){
     });
 }
 function bindConnectionEvents(){
-    world.querySelectorAll('[data-conn-index]').forEach(el => {
-        if(el.classList.contains('conn-hit')){
-            el.addEventListener('dblclick', e => {
-                e.preventDefault(); e.stopPropagation();
-                disconnectConnections(el.dataset.connIndex);
-            });
-            return;
-        }
-        el.addEventListener('click', e => {
-            e.preventDefault(); e.stopPropagation();
-            disconnectConnections(el.dataset.connIndex);
-        });
+    if(connectionEventsBound) return;
+    connectionEventsBound = true;
+    world.addEventListener('click', e => {
+        const el = e.target.closest?.('[data-conn-index]:not(.conn-hit)');
+        if(!el || !world.contains(el)) return;
+        e.preventDefault(); e.stopPropagation();
+        disconnectConnections(el.dataset.connIndex);
+    });
+    world.addEventListener('dblclick', e => {
+        const el = e.target.closest?.('.conn-hit[data-conn-index]');
+        if(!el || !world.contains(el)) return;
+        e.preventDefault(); e.stopPropagation();
+        disconnectConnections(el.dataset.connIndex);
     });
 }
 function ensurePortDragPathElement(){
@@ -10102,13 +10219,20 @@ function pruneSmartGroupMembershipsForNode(node){
     return changed;
 }
 function clearDropHighlight(){
-    world.querySelectorAll('.image-node.drop-target').forEach(el => el.classList.remove('drop-target'));
+    if(dropHighlightEl?.isConnected) dropHighlightEl.classList.remove('drop-target');
+    dropHighlightId = '';
+    dropHighlightEl = null;
 }
 function setDropHighlight(targetId){
+    const id = targetId || '';
+    if(id === dropHighlightId && dropHighlightEl?.isConnected) return;
     clearDropHighlight();
-    if(!targetId) return;
-    const el = world.querySelector(`.image-node[data-id="${targetId}"]`);
-    if(el) el.classList.add('drop-target');
+    if(!id) return;
+    const el = world.querySelector(`.image-node[data-id="${CSS.escape(id)}"]`);
+    if(!el) return;
+    dropHighlightId = id;
+    dropHighlightEl = el;
+    el.classList.add('drop-target');
 }
 function deleteNode(id){
     pushUndo();
@@ -13580,6 +13704,7 @@ function smartLocalImagePathsFromDataTransfer(dataTransfer){
     return uniqueSmartDropValues(smartDropTextCandidates(dataTransfer).filter(isLocalSmartImageDropValue));
 }
 function smartImageNameFromUrl(url){
+    if(String(url || '').startsWith('data:' + 'image/')) return 'image.png';
     try {
         const clean = String(url || '').split('?', 1)[0].split('#', 1)[0];
         return decodeURIComponent(clean.split('/').pop() || 'image');
@@ -13638,6 +13763,17 @@ async function uploadFiles(files){
         ...file,
         kind:file.kind || mediaKindForFile(supported[index])
     }));
+}
+async function localizeSmartCanvasImage(url){
+    const response = await fetch('/api/canvas-media/localize', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({items:[{url, kind:'image'}]})
+    });
+    if(!response.ok) throw new Error(await smartResponseErrorMessage(response, '图片本地化失败'));
+    const item = (await response.json()).items?.[0];
+    if(!item?.local_url) throw new Error(item?.error || '图片本地化失败');
+    return item;
 }
 function appendImagesToSmartNode(uploaded, targetId='', opts={}){
     const images = [...(uploaded || [])].filter(file => file?.url);
@@ -13706,8 +13842,15 @@ async function handleSmartImageDropPayload(payload, targetId='', opts={}){
             if(!opts.skipUndo) pushUndo();
             appendImagesToSmartNode(await importSmartLocalImages(payload.localPaths), targetId, opts);
         } else if(payload.type === 'url') {
+            const item = await localizeSmartCanvasImage(payload.url);
             if(!opts.skipUndo) pushUndo();
-            appendImagesToSmartNode([{url:payload.url, name:smartImageNameFromUrl(payload.url), kind:'image'}], targetId, opts);
+            appendImagesToSmartNode([{
+                url:item.local_url,
+                name:smartImageNameFromUrl(payload.url),
+                kind:'image',
+                natural_w:item.natural_w,
+                natural_h:item.natural_h
+            }], targetId, opts);
         }
     } catch(e) {
         toast(e.message || tr('smart.toastUploadFail'));
@@ -17701,6 +17844,58 @@ smartArrangeBtn?.addEventListener('click', e => {
     e.stopPropagation();
     arrangeSelectedSmartNodes();
 });
+function updateSmartNodeDrag(e){
+    if(!dragState) return;
+    const node = nodes.find(n => n.id === dragState.id);
+    if(!node) return;
+    const moveDx = (e.clientX - dragState.startX) / viewport.scale;
+    const moveDy = (e.clientY - dragState.startY) / viewport.scale;
+    const group = dragState.group || [{id:dragState.id, ox:dragState.ox, oy:dragState.oy}];
+    group.forEach(item => {
+        const n = nodes.find(x => x.id === item.id);
+        if(!n) return;
+        n.x = item.ox + moveDx;
+        n.y = item.oy + moveDy;
+    });
+    if(assetLibraryOpen){
+        const hit = document.elementFromPoint(e.clientX, e.clientY);
+        if(hit && assetPanel?.contains(hit)){
+            setAssetDragOver(true);
+            clearDropHighlight();
+            return;
+        }
+        setAssetDragOver(false);
+    }
+    const draggedRect = nodeRect(node);
+    const rawTarget = dragState.ctrlGroup
+        ? (['smart-prompt','smart-loop'].includes(node.type)
+            ? dragConnectTargetFor(node, screenToWorld(e))
+            : rectOverlapNode(node.id, draggedRect.x, draggedRect.y, draggedRect.width, draggedRect.height, dragState.groupIds))
+        : null;
+    const target = isSmartGroupNode(rawTarget) ? null : rawTarget;
+    setDropHighlight(target?.id || '');
+    moveNodeElementsDuringDrag();
+    updateLoopInsertPreview();
+}
+function flushSmartNodeDragMove(pointer=null){
+    if(smartDragMoveRaf){
+        cancelAnimationFrame(smartDragMoveRaf);
+        smartDragMoveRaf = 0;
+    }
+    const next = pointer
+        ? {clientX:pointer.clientX, clientY:pointer.clientY}
+        : pendingSmartDragPointer;
+    pendingSmartDragPointer = null;
+    if(next && dragState) updateSmartNodeDrag(next);
+}
+function queueSmartNodeDragMove(e){
+    pendingSmartDragPointer = {clientX:e.clientX, clientY:e.clientY};
+    if(smartDragMoveRaf) return;
+    smartDragMoveRaf = requestAnimationFrame(() => {
+        smartDragMoveRaf = 0;
+        flushSmartNodeDragMove();
+    });
+}
 window.onmousemove = e => {
     lastMouseWorld = screenToWorld(e);
     if(smartMinimapDrag){
@@ -17944,37 +18139,7 @@ window.onmousemove = e => {
         return;
     }
     if(!dragState) return;
-    const node = nodes.find(n => n.id === dragState.id);
-    if(!node) return;
-    const moveDx = (e.clientX - dragState.startX) / viewport.scale;
-    const moveDy = (e.clientY - dragState.startY) / viewport.scale;
-    (dragState.group || [{id:dragState.id, ox:dragState.ox, oy:dragState.oy}]).forEach(item => {
-        const n = nodes.find(x => x.id === item.id);
-        if(!n) return;
-        n.x = item.ox + moveDx;
-        n.y = item.oy + moveDy;
-    });
-    if(assetLibraryOpen){
-        const hit = document.elementFromPoint(e.clientX, e.clientY);
-        if(hit && assetPanel?.contains(hit)){
-            setAssetDragOver(true);
-            clearDropHighlight();
-            setAssetDragOver(true);
-            return;
-        }
-        setAssetDragOver(false);
-    }
-    const draggedRect = nodeRect(node);
-    const rawTarget = dragState.ctrlGroup
-        ? (['smart-prompt','smart-loop'].includes(node.type)
-            ? dragConnectTargetFor(node, screenToWorld(e))
-            : rectOverlapNode(node.id, draggedRect.x, draggedRect.y, draggedRect.width, draggedRect.height, dragState.groupIds))
-        : null;
-    const target = isSmartGroupNode(rawTarget) ? null : rawTarget;
-    setDropHighlight(target?.id || '');
-    moveNodeElementsDuringDrag();
-    updateLoopInsertPreview();
-    if(target) setDropHighlight(target.id);
+    queueSmartNodeDragMove(e);
 };
 window.onmouseup = e => {
     document.body.classList.remove('smart-node-drag');
@@ -17995,6 +18160,7 @@ window.onmouseup = e => {
         handlePortDrop(drag, e);
         return;
     }
+    if(dragState) flushSmartNodeDragMove(e);
     if(promptResizeState){ promptResizeState = null; scheduleSave(); }
     if(selectionState) finishSelection(e);
     if(previewCompareDrag) previewCompareDrag = false;

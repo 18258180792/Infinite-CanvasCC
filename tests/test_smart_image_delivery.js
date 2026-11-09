@@ -35,7 +35,7 @@ function harness(){
         SMART_SELECTED_HIGH_RES_DELAY: 200,
     });
     for(const name of ['smartOriginalMediaUrl', 'fileNameFromUrl', 'outputUrlLooksVideo',
-        'proxiedMediaUrl', 'displayMediaUrl', 'smartMediaPreviewUrl', 'bindImageProxyFallback',
+        'proxiedMediaUrl', 'displayMediaUrl', 'smartMediaPreviewUrl', 'smartImageNameFromUrl', 'bindImageProxyFallback',
         'syncSmartSelectedImageResolution']){
         vm.runInContext(functionSource(name), context);
     }
@@ -82,14 +82,34 @@ function fakeImage(url){
 }
 const remote = 'https://cdn.example.test/result.png';
 
-test('remote image starts direct; remote video remains proxied; local preview is unchanged', () => {
+test('remote image uses cached thumbnail; remote video remains proxied; local preview is unchanged', () => {
     const {context} = harness();
-    assert.equal(context.smartMediaPreviewUrl(remote), remote);
-    assert.equal(context.smartMediaPreviewUrl({url:remote}), remote);
+    assert.equal(context.smartMediaPreviewUrl(remote),
+        '/api/media-preview?w=512&url=https%3A%2F%2Fcdn.example.test%2Fresult.png');
+    assert.equal(context.smartMediaPreviewUrl({url:remote}),
+        '/api/media-preview?w=512&url=https%3A%2F%2Fcdn.example.test%2Fresult.png');
     const video = 'https://cdn.example.test/result.mp4';
     assert.equal(context.smartMediaPreviewUrl(video), context.proxiedMediaUrl(video));
     assert.equal(context.smartMediaPreviewUrl('/assets/output/result.png', 512),
         '/api/media-preview?w=512&url=%2Fassets%2Foutput%2Fresult.png');
+    assert.equal(context.smartMediaPreviewUrl('/api/storage-files/generated/result.png', 512),
+        '/api/media-preview?w=512&url=%2Fapi%2Fstorage-files%2Fgenerated%2Fresult.png');
+});
+
+test('remote thumbnail does not switch to a full-size proxy while loading', () => {
+    const h = harness();
+    const image = fakeImage(h.context.smartMediaPreviewUrl(remote));
+    image.dataset.originalSrc = remote;
+    h.context.bindImageProxyFallback(image, remote);
+    h.tick(5000);
+    assert.equal(image.writes.length, 0);
+    image.emit('error');
+    assert.equal(image.src, h.context.proxiedMediaUrl(remote));
+});
+
+test('inline image names do not retain base64 text', () => {
+    const {context} = harness();
+    assert.equal(context.smartImageNameFromUrl('data:' + 'image/png;base64,AAAA'), 'image.png');
 });
 
 test('direct image gets five seconds before switching to proxy', () => {

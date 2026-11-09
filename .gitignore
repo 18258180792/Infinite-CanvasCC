@@ -23,6 +23,7 @@ venv/
 assets/
 output/
 data/media_previews/
+data/migration_backups/
 data/update_backups/
 data/update_staging/
 data/canvases/

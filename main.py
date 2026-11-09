@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import datetime
+import ipaddress
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -21,6 +22,7 @@ import logging
 import contextvars
 import logging.handlers
 import ssl
+import socket
 import requests
 import zipfile
 import mimetypes
@@ -181,7 +183,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.07.1"
+APP_VERSION = "2026.11.09.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -3162,6 +3164,14 @@ class CanvasSaveRequest(BaseModel):
     client_id: str = ""
     base_updated_at: int = 0
 
+class CanvasMediaLocalizeItem(BaseModel):
+    url: str = ""
+    name: str = ""
+    kind: str = "image"
+
+class CanvasMediaLocalizeRequest(BaseModel):
+    items: List[CanvasMediaLocalizeItem] = []
+
 class CanvasAssetCheckRequest(BaseModel):
     urls: List[str] = []
 
@@ -3791,7 +3801,7 @@ def new_canvas(title="未命名画布", icon="layers", kind="classic", project=N
         "updated_at": timestamp,
         "nodes": [],
         "connections": [],
-        "viewport": {"x": 0, "y": 0, "scale": 1},
+        "viewport": {"x": 0, "y": 0, "scale": 0.45 if canvas_kind == "smart" else 1},
     }
     if board_x is not None:
         canvas["board_x"] = float(board_x)
@@ -7347,14 +7357,59 @@ def generate_video_preview_image(path: str, width: int) -> Image.Image:
         except OSError:
             pass
 
+def build_media_preview_file(path: str, width: int, cache_dir: str = "", cache_key: str = ""):
+    target_dir = cache_dir or MEDIA_PREVIEW_DIR
+    if cache_key:
+        webp_path = os.path.join(target_dir, f"{cache_key}.webp")
+        png_path = os.path.join(target_dir, f"{cache_key}.png")
+    else:
+        webp_path, png_path = media_preview_cache_paths(path, width)
+    if os.path.isfile(webp_path):
+        return webp_path, "image/webp"
+    if os.path.isfile(png_path):
+        return png_path, "image/png"
+    os.makedirs(target_dir, exist_ok=True)
+    if is_video_preview_file(path):
+        img = generate_video_preview_image(path, width)
+    else:
+        with Image.open(path) as source:
+            img = ImageOps.exif_transpose(source)
+            img.thumbnail((width, width), Image.LANCZOS)
+            img = img.convert("RGBA" if image_has_alpha(img) else "RGB")
+    try:
+        img.save(webp_path, format="WEBP", quality=80, method=1)
+        return webp_path, "image/webp"
+    except Exception:
+        img.save(png_path, format="PNG")
+        return png_path, "image/png"
+
 @app.get("/api/media-preview")
 async def media_preview(url: str, w: int = 512):
     path = output_file_from_url(url)
+    remote_url = ""
     if not path or not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="媒体文件不存在")
+        if not await asyncio.to_thread(public_canvas_image_url, url):
+            raise HTTPException(status_code=404, detail="媒体文件不存在")
+        remote_url = str(url or "").strip()
 
     width = max(64, min(2048, int(w or 512)))
-    webp_path, png_path = media_preview_cache_paths(path, width)
+    if remote_url:
+        _remote_root, remote_key, _cached = remote_image_cache_location(remote_url)
+        cache_source = f"remote:{remote_key}"
+        cache_base = os.path.join(MEDIA_PREVIEW_DIR, "remote-previews")
+        stat_suffix = "remote"
+    else:
+        cache_source = os.path.abspath(path)
+        cache_base = MEDIA_PREVIEW_DIR
+        stat = os.stat(path)
+        stat_suffix = f"{stat.st_mtime_ns}|{stat.st_size}"
+    if remote_url:
+        key = hashlib.sha1(f"{cache_source}|{stat_suffix}|{width}".encode("utf-8", "ignore")).hexdigest()
+        webp_path = os.path.join(cache_base, f"{key}.webp")
+        png_path = os.path.join(cache_base, f"{key}.png")
+    else:
+        key = ""
+        webp_path, png_path = media_preview_cache_paths(path, width)
 
     if os.path.exists(webp_path):
         return FileResponse(webp_path, media_type="image/webp")
@@ -7362,26 +7417,19 @@ async def media_preview(url: str, w: int = 512):
         return FileResponse(png_path, media_type="image/png")
 
     def _build_preview():
-        # 同步 PIL 处理 + 落盘，放到线程里执行，避免阻塞事件循环（几十张首次生成会卡死整个 loop → 缩略图全空白）
-        os.makedirs(MEDIA_PREVIEW_DIR, exist_ok=True)
-        if is_video_preview_file(path):
-            img = generate_video_preview_image(path, width)
-        else:
-            with Image.open(path) as source:
-                img = ImageOps.exif_transpose(source)
-                img.thumbnail((width, width), Image.LANCZOS)
-                img = img.convert("RGBA" if image_has_alpha(img) else "RGB")
-        try:
-            img.save(webp_path, format="WEBP", quality=80, method=1)   # method=1 生成更快（缩略图不追求极致压缩）
-            return webp_path, "image/webp"
-        except Exception:
-            img.save(png_path, format="PNG")
-            return png_path, "image/png"
+        source_path = path
+        if remote_url:
+            source_path = persist_public_canvas_image(remote_url)
+        return build_media_preview_file(source_path, width, cache_base, key)
 
     try:
         out_path, media_type = await asyncio.to_thread(_build_preview)
         return FileResponse(out_path, media_type=media_type)
     except Exception as exc:
+        if remote_url:
+            LOG.warning("canvas_remote_preview_failed host=%s error_type=%s",
+                        urllib.parse.urlsplit(remote_url).hostname or "unknown", type(exc).__name__)
+            raise HTTPException(status_code=415, detail="远程图片暂时无法生成预览图") from exc
         raise HTTPException(status_code=415, detail=f"无法生成预览图：{exc}") from exc
 
 @app.get("/api/image-jpeg")
@@ -7500,7 +7548,7 @@ def prune_remote_image_cache(cache_root: str, keep_path: str):
     except OSError:
         pass
 
-def cache_remote_inline_image(url: str, response, headers: dict, timeout=REMOTE_INLINE_IMAGE_TIMEOUT, verify_image=False):
+def cache_remote_inline_image(url: str, response, headers: dict, timeout=REMOTE_INLINE_IMAGE_TIMEOUT, verify_image=False, request_get=None):
     """Read an inline image fully before responding so body timeouts can be retried safely."""
     cache_root, key, cached_path = remote_image_cache_location(url)
     if cached_path and verify_image:
@@ -7531,7 +7579,7 @@ def cache_remote_inline_image(url: str, response, headers: dict, timeout=REMOTE_
             remaining = remaining_budget()
             if attempt:
                 retry_timeout = tuple(min(value, remaining) for value in timeout) if isinstance(timeout, tuple) else min(timeout, remaining)
-                current = requests.get(url, stream=True, timeout=retry_timeout, headers=headers)
+                current = (request_get or requests.get)(url, stream=True, timeout=retry_timeout, headers=headers)
             remaining_budget()
             current.raise_for_status()
             content_type = (current.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
@@ -7609,6 +7657,39 @@ def persist_remote_generated_image(url: str):
         attempts=2, retry_delay=0.35, headers=headers,
     )
     result = cache_remote_inline_image(url, response, headers, verify_image=True)
+    if not result:
+        raise requests.RequestException("上游未返回图片类型")
+    return result[0]
+
+def public_canvas_image_get(url: str, **kwargs):
+    current_url = url
+    for _ in range(5):
+        if not public_canvas_image_url(current_url):
+            raise requests.RequestException("远程图片重定向到了非公网地址")
+        response = requests.get(current_url, allow_redirects=False, **kwargs)
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response
+        location = response.headers.get("location")
+        response.close()
+        if not location:
+            raise requests.RequestException("远程图片重定向缺少目标地址")
+        current_url = urllib.parse.urljoin(current_url, location)
+    raise requests.RequestException("远程图片重定向次数过多")
+
+def persist_public_canvas_image(url: str):
+    _root, _key, cached_path = remote_image_cache_location(url)
+    if cached_path:
+        try:
+            with Image.open(cached_path) as image:
+                image.verify()
+            return cached_path
+        except Exception:
+            os.remove(cached_path)
+    headers = {"User-Agent": "Infinite-Canvas/1.0", "Accept-Encoding": "identity"}
+    response = public_canvas_image_get(url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT, headers=headers)
+    result = cache_remote_inline_image(
+        url, response, headers, verify_image=True, request_get=public_canvas_image_get
+    )
     if not result:
         raise requests.RequestException("上游未返回图片类型")
     return result[0]
@@ -10088,6 +10169,179 @@ def image_output_meta(url, source_item=None):
         except Exception:
             pass
     return meta
+
+CANVAS_INLINE_IMAGE_MAX_BYTES = 50 * 1024 * 1024
+CANVAS_IMAGE_FORMAT_EXTS = {
+    "PNG": ".png",
+    "JPEG": ".jpg",
+    "WEBP": ".webp",
+    "GIF": ".gif",
+    "BMP": ".bmp",
+    "TIFF": ".tiff",
+    "AVIF": ".avif",
+}
+
+def public_canvas_image_url(value: str) -> bool:
+    parsed = urllib.parse.urlsplit(str(value or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    host = parsed.hostname.lower().rstrip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+            }
+        except OSError:
+            return False
+        return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
+
+def save_canvas_inline_image_to_output(data_url: str):
+    header, separator, payload = str(data_url or "").partition(",")
+    if not separator or not header.lower().startswith("data:image/"):
+        raise ValueError("不是有效的 data:image URL")
+    try:
+        content = base64.b64decode(payload, validate=False) if ";base64" in header.lower() else urllib.parse.unquote_to_bytes(payload)
+    except Exception as exc:
+        raise ValueError("图片数据无法解码") from exc
+    if not content:
+        raise ValueError("图片内容为空")
+    if len(content) > CANVAS_INLINE_IMAGE_MAX_BYTES:
+        raise ValueError("单张内嵌图片超过 50MB")
+    try:
+        with Image.open(BytesIO(content)) as image:
+            width, height = image.size
+            image_format = str(image.format or "").upper()
+            image.verify()
+    except Exception as exc:
+        raise ValueError("内嵌图片格式无效或已损坏") from exc
+    extension = CANVAS_IMAGE_FORMAT_EXTS.get(image_format)
+    if not extension:
+        raise ValueError(f"不支持的内嵌图片格式：{image_format or 'unknown'}")
+
+    digest = hashlib.sha256(content).hexdigest()
+    filename = f"canvas_media_{digest[:32]}{extension}"
+    path = output_path_for(filename, "output")
+    if not os.path.isfile(path) or os.path.getsize(path) != len(content):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temp_path, "wb") as target:
+                target.write(content)
+            os.replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    return output_url_for(filename, "output"), width, height
+
+def copy_remote_canvas_image_to_output(url: str, cached_path: str):
+    extension = os.path.splitext(cached_path)[1].lower()
+    if extension not in REMOTE_IMAGE_CACHE_EXTS:
+        raise ValueError("远程缓存不是受支持的图片格式")
+    with Image.open(cached_path) as image:
+        width, height = image.size
+        image.verify()
+    digest = hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
+    filename = f"canvas_remote_{digest[:32]}{extension}"
+    path = output_path_for(filename, "output")
+    if not os.path.isfile(path) or os.path.getsize(path) != os.path.getsize(cached_path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copyfile(cached_path, temp_path)
+            os.replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    return output_url_for(filename, "output"), width, height
+
+async def localize_canvas_image_url(url: str):
+    value = str(url or "").strip()
+    if not value:
+        return value, 0, 0
+    if value.lower().startswith("data:image/"):
+        return await asyncio.to_thread(save_canvas_inline_image_to_output, value)
+    local_path = output_file_from_url(value)
+    if not local_path:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+            local_path = output_file_from_url(urllib.parse.unquote(parsed.path or ""))
+            if local_path:
+                value = urllib.parse.unquote(parsed.path or "")
+    if local_path:
+        try:
+            with Image.open(local_path) as image:
+                return value, image.width, image.height
+        except Exception:
+            raise ValueError("本地图片不可读取")
+    if value.startswith(("/assets/", "/output/", "/api/storage-files/")):
+        raise ValueError("本地图片文件不存在")
+    if not await asyncio.to_thread(public_canvas_image_url, value):
+        raise ValueError("远程图片地址不是可公开访问的 HTTP(S) 图片地址")
+    cached_path = await asyncio.to_thread(persist_public_canvas_image, value)
+    return await asyncio.to_thread(copy_remote_canvas_image_to_output, value, cached_path)
+
+def normalize_canvas_image_references(canvas):
+    """Localize image references while keeping unrelated metadata and media untouched."""
+    replacements = {}
+    failures = {}
+    preview_paths = set()
+
+    def walk(value, parent=None, key=""):
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                if child_key in {"originalRemoteUrl", "cloudUrl", "uploadedUrl", "tempCloudUrl"}:
+                    continue
+                value[child_key] = walk(child, value, child_key)
+            return value
+        if isinstance(value, list):
+            for index, child in enumerate(value):
+                value[index] = walk(child, parent, key)
+            return value
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        is_inline = text.lower().startswith("data:" + "image/")
+        is_remote_image = (
+            key == "url" and text.startswith(("http://", "https://"))
+            and not (isinstance(parent, dict) and str(parent.get("kind") or parent.get("type") or "").lower() in {"video", "audio", "file", "text"})
+            and bool(re.search(r"\.(?:png|jpe?g|webp|gif|bmp|avif|tiff?)(?:[?#]|$)", text, re.I))
+        )
+        is_local_image = key == "url" and text.startswith(("/assets/", "/output/", "/api/storage-files/")) and bool(
+            re.search(r"\.(?:png|jpe?g|webp|gif|bmp|avif|tiff?)(?:[?#]|$)", text, re.I)
+        )
+        if not (is_inline or is_remote_image or is_local_image):
+            return value
+        if text not in replacements and text not in failures:
+            try:
+                if is_inline:
+                    replacement, _, _ = save_canvas_inline_image_to_output(text)
+                elif is_remote_image:
+                    if not public_canvas_image_url(text):
+                        raise ValueError("非公网地址")
+                    cached_path = persist_public_canvas_image(text)
+                    replacement, _, _ = copy_remote_canvas_image_to_output(text, cached_path)
+                else:
+                    replacement = text
+                local_path = output_file_from_url(replacement)
+                if not local_path or not os.path.isfile(local_path):
+                    raise ValueError("本地文件不存在")
+                replacements[text] = replacement
+                preview_paths.add(local_path)
+            except Exception as exc:
+                failures[text] = type(exc).__name__
+        return replacements.get(text, value)
+
+    walk(canvas)
+    return replacements, failures, preview_paths
 
 async def save_remote_video_to_output(url, prefix="video_", category="output"):
     if not url:
@@ -17069,6 +17323,27 @@ async def get_canvas(canvas_id: str):
     canvas = load_canvas(canvas_id)
     canvas["project_name"] = generated_image_project_name(canvas_id)
     return {"canvas": canvas}
+
+@app.post("/api/canvas-media/localize")
+async def localize_canvas_media(payload: CanvasMediaLocalizeRequest, request: Request):
+    ensure_same_origin_request(request)
+    items = (payload.items or [])[:20]
+    results = []
+    for item in items:
+        source = str(item.url or "").strip()
+        if not source or str(item.kind or "image").lower() != "image":
+            results.append({"url": source, "error": "只支持图片"})
+            continue
+        try:
+            local_url, width, height = await localize_canvas_image_url(source)
+            if not output_file_from_url(local_url):
+                raise ValueError("图片未能保存为本地文件")
+            results.append({"url": source, "local_url": local_url, "natural_w": width, "natural_h": height})
+        except Exception as exc:
+            LOG.warning("canvas_media_localize_failed source=%s error_type=%s",
+                        urllib.parse.urlsplit(source).hostname or "inline", type(exc).__name__)
+            results.append({"url": source, "error": "图片本地化失败"})
+    return {"items": results}
 
 @app.post("/api/canvases/{canvas_id}/touch")
 async def touch_canvas(canvas_id: str):
