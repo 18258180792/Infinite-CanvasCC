@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+python/
+
+# 运行时生成的文件
+logs/
+*.log
+_self_restart.log
+history.json
+
+# 输出文件
+output/
+
+# Playwright
+.playwright-cli/
+
+# 用户数据和配置
+data/*.json
+data/*.db
+data/canvases/
+data/trash/
+data/assets/
+!data/asset_library.json
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+.DS_Store
+
+# 打包文件
+*.zip
+*.tar.gz
+*.rar
+
+# 环境变量
+.env
+.env.local
+
+# 测试覆盖率
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
