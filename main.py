@@ -12744,19 +12744,26 @@ def view_image(filename: str, type: str = "input", subfolder: str = ""):
 def download_output(request: Request, url: str, name: str = "", inline: bool = False):
     url = rewrite_runninghub_file_url(url)
     path = output_file_from_url(url)
-    if not path:
-        path = local_media_file_by_basename(filename_from_media_url(url, ""))
     if path:
         filename = sanitize_export_filename(os.path.basename(name) if name else os.path.basename(path), os.path.basename(path))
         return FileResponse(path, media_type=content_type_for_path(path), filename=None if inline else filename)
     parsed = urllib.parse.urlparse(str(url or "").strip())
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="无效的下载地址")
-    cached_remote_image = ""
-    if inline:
+    if parsed.scheme in ("http", "https") and parsed.netloc:
         _cache_root, _cache_key, cached_remote_image = remote_image_cache_location(url)
         if cached_remote_image:
-            return FileResponse(cached_remote_image, media_type=remote_image_content_type(cached_remote_image))
+            fallback = filename_from_media_url(url, "download.bin")
+            filename = sanitize_export_filename(os.path.basename(name) if name else fallback, fallback)
+            return FileResponse(
+                cached_remote_image,
+                media_type=remote_image_content_type(cached_remote_image),
+                filename=None if inline else filename,
+            )
+    path = local_media_file_by_basename(filename_from_media_url(url, ""))
+    if path:
+        filename = sanitize_export_filename(os.path.basename(name) if name else os.path.basename(path), os.path.basename(path))
+        return FileResponse(path, media_type=content_type_for_path(path), filename=None if inline else filename)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="无效的下载地址")
     try:
         upstream_headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0"}
         if inline:
@@ -17402,19 +17409,31 @@ async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
             if path and os.path.isfile(path):
                 base = sanitize_export_filename(requested_name or os.path.basename(path), os.path.basename(path) or f"image-{count + 1}.png")
             else:
-                local_by_name = local_media_file_by_basename(filename_from_media_url(text, ""))
-                if local_by_name and os.path.isfile(local_by_name):
-                    path = local_by_name
-                    base = sanitize_export_filename(requested_name or os.path.basename(path), os.path.basename(path) or f"image-{count + 1}.png")
+                remote_url = rewrite_runninghub_file_url(text)
+                parsed_remote = urllib.parse.urlparse(remote_url)
+                cached_remote_image = ""
+                if parsed_remote.scheme in ("http", "https") and parsed_remote.netloc:
+                    _cache_root, _cache_key, cached_remote_image = remote_image_cache_location(remote_url)
+                if cached_remote_image:
+                    path = cached_remote_image
+                    base = sanitize_export_filename(
+                        requested_name or filename_from_media_url(text, f"image-{count + 1}.bin"),
+                        f"image-{count + 1}.bin",
+                    )
                 else:
-                    try:
-                        remote = fetch_remote_media_bytes(text)
-                    except Exception:
-                        remote = None
-                    if not remote:
-                        continue
-                    content, content_type = remote
-                    base = sanitize_export_filename(requested_name or filename_from_media_url(text, f"image-{count + 1}.bin"), f"image-{count + 1}.bin")
+                    local_by_name = local_media_file_by_basename(filename_from_media_url(text, ""))
+                    if local_by_name and os.path.isfile(local_by_name):
+                        path = local_by_name
+                        base = sanitize_export_filename(requested_name or os.path.basename(path), os.path.basename(path) or f"image-{count + 1}.png")
+                    else:
+                        try:
+                            remote = fetch_remote_media_bytes(remote_url)
+                        except Exception:
+                            remote = None
+                        if not remote:
+                            continue
+                        content, content_type = remote
+                        base = sanitize_export_filename(requested_name or filename_from_media_url(text, f"image-{count + 1}.bin"), f"image-{count + 1}.bin")
             name, ext = os.path.splitext(base)
             archive_name = base
             suffix = 2

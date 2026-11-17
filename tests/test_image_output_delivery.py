@@ -4,6 +4,7 @@ import io
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -152,6 +153,52 @@ class ImageOutputDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Path(cached.path).read_bytes(), b"image")
         self.assertEqual(result.status_code, 200)
         self.assertEqual(get.call_args.kwargs["headers"]["Accept-Encoding"], "identity")
+
+    async def test_attachment_download_uses_remote_cache_without_network_request(self):
+        source_url = "https://images.example.test/result.png"
+        cache_root, cache_key, _cached = main.remote_image_cache_location(source_url)
+        Path(cache_root).mkdir(parents=True)
+        cached = Path(cache_root) / f"{cache_key}.png"
+        Image.new("RGB", (2, 2), "red").save(cached, format="PNG")
+        same_name_local_file = self.root / "result.png"
+        same_name_local_file.write_bytes(b"different local image")
+        request = main.Request({"type": "http", "method": "GET", "headers": []})
+
+        with (
+            patch.object(main, "output_file_from_url", return_value=None),
+            patch.object(main, "local_media_file_by_basename", return_value=str(same_name_local_file)),
+            patch.object(main.requests, "get") as get,
+        ):
+            result = main.download_output(request, source_url, "chosen-name.png")
+
+        get.assert_not_called()
+        self.assertEqual(Path(result.path), cached)
+        self.assertEqual(result.headers["content-type"], "image/png")
+        self.assertIn("chosen-name.png", result.headers["content-disposition"])
+
+    async def test_canvas_asset_zip_uses_remote_cache_without_network_request(self):
+        source_url = "https://images.example.test/result.png"
+        cache_root, cache_key, _cached = main.remote_image_cache_location(source_url)
+        Path(cache_root).mkdir(parents=True)
+        cached = Path(cache_root) / f"{cache_key}.png"
+        Image.new("RGB", (2, 2), "blue").save(cached, format="PNG")
+        same_name_local_file = self.root / "result.png"
+        same_name_local_file.write_bytes(b"different local image")
+
+        with (
+            patch.object(main, "output_file_from_url", return_value=None),
+            patch.object(main, "local_media_file_by_basename", return_value=str(same_name_local_file)),
+            patch.object(main, "fetch_remote_media_bytes") as fetch,
+        ):
+            result = await main.download_canvas_assets(main.CanvasAssetDownloadRequest(items=[{
+                "url": source_url,
+                "name": "chosen-name.png",
+            }]))
+
+        fetch.assert_not_called()
+        with zipfile.ZipFile(io.BytesIO(result.body)) as archive:
+            self.assertEqual(archive.namelist(), ["chosen-name.png"])
+            self.assertEqual(archive.read("chosen-name.png"), cached.read_bytes())
 
     async def test_inline_image_retries_when_body_read_times_out(self):
         source_url = "https://images.example.test/result.png"

@@ -13161,11 +13161,107 @@ function loadPromptDraft(subject){
         setPromptText('');
     }
 }
+// composer 文案区尺寸：宽度/高度按节点记在 runSettings（composerW / promptH / promptExpanded）。
+const COMPOSER_W_DEFAULT = 540;
+const COMPOSER_W_MIN = 420;
+const COMPOSER_W_MAX = 960;
+const PROMPT_H_DEFAULT = 124;
+const PROMPT_H_MIN = 60;
+const PROMPT_H_MAX = 900;
+function clampNumber(value, min, max, fallback){
+    const n = Number(value);
+    return Math.max(min, Math.min(max, Number.isFinite(n) && n > 0 ? n : fallback));
+}
+function composerCardWidth(){
+    return Math.round(clampNumber(settings?.composerW, COMPOSER_W_MIN, COMPOSER_W_MAX, COMPOSER_W_DEFAULT));
+}
+function promptBaseHeight(){
+    return Math.round(clampNumber(settings?.promptH, PROMPT_H_MIN, PROMPT_H_MAX, PROMPT_H_DEFAULT));
+}
+// 展开态上限：约占屏幕 62% 高度，按画布缩放换算回世界坐标，保证缩放后屏幕上看起来高度一致。
+function promptExpandedMaxHeight(){
+    const scale = Math.max(0.1, Number(viewport?.scale) || 1);
+    const screenH = shell?.clientHeight || window.innerHeight || 900;
+    return Math.round(Math.max(320, Math.min(1600, screenH * 0.62 / scale)));
+}
+function promptVisibleText(){
+    return String(promptInput?.innerText || '').replace(/\u200b/g, '').trim();
+}
+function syncPromptExpandUi(){
+    if(!promptInput) return;
+    const expanded = Boolean(settings?.promptExpanded);
+    composer?.classList?.toggle('prompt-expanded', expanded);
+    const btn = document.getElementById('promptExpandBtn');
+    if(btn && btn.dataset.state !== (expanded ? 'expanded' : 'normal')){
+        btn.dataset.state = expanded ? 'expanded' : 'normal';
+        const label = tr(expanded ? 'smart.promptCollapse' : 'smart.promptExpand');
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+        btn.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+        btn.classList.toggle('active', expanded);
+        btn.innerHTML = `<i data-lucide="${expanded ? 'minimize-2' : 'maximize-2'}"></i>`;
+        refreshIcons();
+    }
+    const count = document.getElementById('promptCharCount');
+    const len = promptVisibleText().length;
+    if(count) count.textContent = len ? trf('smart.promptChars', {count:len}) : '';
+    const hint = document.getElementById('promptMoreHint');
+    const overflowing = promptInput.scrollHeight > promptInput.clientHeight + 4;
+    if(hint) hint.classList.toggle('visible', !expanded && overflowing);
+    promptInput.classList.toggle('prompt-overflowing', !expanded && overflowing);
+}
+function applyPromptHeight(){
+    if(!promptInput) return;
+    const base = promptBaseHeight();
+    const maxExpanded = promptExpandedMaxHeight();
+    promptInput.style.setProperty('--prompt-max', `${Math.max(PROMPT_H_MAX, maxExpanded)}px`);
+    if(settings?.promptExpanded){
+        // 先取内容自然高度，再夹在 [当前高度, 展开上限] 之间：文案少时不会无意义地拉高。
+        promptInput.style.setProperty('--prompt-h', 'auto');
+        const natural = Math.ceil(promptInput.scrollHeight + 2);
+        promptInput.style.setProperty('--prompt-h', `${Math.max(base, Math.min(maxExpanded, natural))}px`);
+    } else {
+        promptInput.style.setProperty('--prompt-h', `${base}px`);
+    }
+    syncPromptExpandUi();
+}
+let promptHeightFrame = 0;
+function schedulePromptHeightSync(){
+    if(promptHeightFrame) return;
+    promptHeightFrame = requestAnimationFrame(() => { promptHeightFrame = 0; applyPromptHeight(); });
+}
+function setPromptExpanded(expanded){
+    if(!settings) return;
+    settings.promptExpanded = Boolean(expanded);
+    applyPromptHeight();
+    const node = activeComposerNode();
+    if(node) positionComposerForNode(node);
+    if(settings.promptExpanded) keepComposerInView();
+    persistActiveSmartSettings();
+    scheduleSave();
+}
+// 展开后卡片底部超出屏幕时，把画布往上平移刚好露出卡片底部（不超过卡片顶部贴到屏幕顶部）。
+function keepComposerInView(){
+    if(!composer || !shell) return;
+    const shellRect = shell.getBoundingClientRect();
+    const rect = composer.getBoundingClientRect();
+    const margin = 24;
+    const overflow = rect.bottom - (shellRect.bottom - margin);
+    if(overflow <= 0) return;
+    const room = Math.max(0, rect.top - (shellRect.top + 80));
+    const shift = Math.min(overflow, room);
+    if(shift <= 0) return;
+    viewport.y -= shift;
+    applyViewport();
+}
+function togglePromptExpanded(){
+    setPromptExpanded(!settings?.promptExpanded);
+}
 function positionComposerForNode(node){
     if(!node) return;
     const rect = nodeRect(node);
     const gap = 14;
-    const cardW = 540;
+    const cardW = composerCardWidth();
     composer.style.width = `${cardW}px`;
     composer.style.left = `${rect.x + rect.width / 2 - cardW / 2}px`;
     composer.style.top = `${rect.y + rect.height + gap}px`;
@@ -13234,8 +13330,7 @@ function updateComposer(){
     setPromptInputLocked(false);
     syncCascadeRunButton(node);
     positionComposerForNode(node);
-    const ph = Math.max(60, Math.min(380, Number(settings.promptH) || 124));
-    promptInput.style.setProperty('--prompt-h', `${ph}px`);
+    applyPromptHeight();
     renderInputThumbsRow(node);
     renderInputPromptPreview(node);
     syncCascadeRunButton(node);
@@ -13246,9 +13341,19 @@ function renderInputPromptPreview(node){
     const groupText = isSmartGroupNode(node) ? textForNode(node).trim() : '';
     const text = node ? [groupText, inputPromptTextFor(node).trim()].filter(Boolean).join('\n\n') : '';
     inputPromptPreview.classList.toggle('has-text', Boolean(text));
+    const expanded = Boolean(settings?.upstreamExpanded);
+    inputPromptPreview.classList.toggle('expanded', expanded);
+    const toggleLabel = tr(expanded ? 'smart.inputUpstreamCollapse' : 'smart.inputUpstreamExpand');
     inputPromptPreview.innerHTML = text
-        ? `<div class="input-prompt-preview-label">${escapeHtml(tr('smart.inputUpstream'))}</div><div class="input-prompt-preview-text">${escapeHtml(text)}</div>`
+        ? `<div class="input-prompt-preview-label"><span>${escapeHtml(tr('smart.inputUpstream'))}</span><span class="input-prompt-preview-count">${escapeHtml(trf('smart.promptChars', {count:text.length}))}</span><button class="input-prompt-preview-toggle" type="button" data-upstream-toggle>${escapeHtml(toggleLabel)}<i data-lucide="${expanded ? 'chevron-up' : 'chevron-down'}"></i></button></div><div class="input-prompt-preview-text">${escapeHtml(text)}</div>`
         : '';
+    if(text){
+        refreshIcons();
+        const body = inputPromptPreview.querySelector('.input-prompt-preview-text');
+        const toggle = inputPromptPreview.querySelector('[data-upstream-toggle]');
+        // 内容本来就放得下时隐藏「展开」按钮
+        if(body && toggle && !expanded && body.scrollHeight <= body.clientHeight + 2) toggle.hidden = true;
+    }
 }
 function renderInputThumbsRow(node){
     if(!inputThumbsRow) return;
@@ -17936,9 +18041,20 @@ window.onmousemove = e => {
     }
     if(promptResizeState){
         e.preventDefault();
-        const dy = e.clientY - promptResizeState.startY;
-        settings.promptH = Math.max(60, Math.min(380, promptResizeState.startH + dy));
-        promptInput.style.setProperty('--prompt-h', `${settings.promptH}px`);
+        // composer 在 world 内按世界坐标排版，鼠标位移要除以缩放比例，拖拽才能跟手。
+        const scale = Math.max(0.1, Number(viewport?.scale) || 1);
+        const dy = (e.clientY - promptResizeState.startY) / scale;
+        const maxH = Math.max(PROMPT_H_MAX, promptExpandedMaxHeight());
+        settings.promptH = Math.round(Math.max(PROMPT_H_MIN, Math.min(maxH, promptResizeState.startH + dy)));
+        if(promptResizeState.resizeWidth){
+            const dx = (e.clientX - promptResizeState.startX) / scale;
+            // 卡片以节点中心对齐，宽度向两侧同时扩展，所以位移乘 2 才跟手。
+            settings.composerW = Math.round(Math.max(COMPOSER_W_MIN, Math.min(COMPOSER_W_MAX, promptResizeState.startW + dx * 2)));
+            const node = activeComposerNode();
+            if(node) positionComposerForNode(node);
+        }
+        settings.promptExpanded = false;
+        applyPromptHeight();
         persistActiveSmartSettings();
         return;
     }
@@ -18516,16 +18632,50 @@ if(apiKindToggle){
 }
 let promptResizeState = null;
 const promptResize = document.getElementById('promptResize');
+function startPromptResize(e, resizeWidth=false){
+    if(e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const scale = Math.max(0.1, Number(viewport?.scale) || 1);
+    // 从当前实际高度起拖（展开态下也是），避免一拖就跳回旧高度。
+    const currentH = promptInput.getBoundingClientRect().height / scale;
+    promptResizeState = {
+        startX: e.clientX,
+        startY: e.clientY,
+        startH: Math.round(currentH || promptBaseHeight()),
+        startW: composerCardWidth(),
+        resizeWidth
+    };
+}
 if(promptResize){
-    promptResize.addEventListener('mousedown', e => {
-        if(e.button !== 0) return;
+    promptResize.addEventListener('mousedown', e => startPromptResize(e, false));
+    promptResize.addEventListener('dblclick', e => { e.preventDefault(); e.stopPropagation(); togglePromptExpanded(); });
+}
+const composerResize = document.getElementById('composerResize');
+if(composerResize){
+    composerResize.addEventListener('mousedown', e => startPromptResize(e, true));
+    composerResize.addEventListener('dblclick', e => {
         e.preventDefault(); e.stopPropagation();
-        promptResizeState = {
-            startY: e.clientY,
-            startH: Number(settings.promptH) || promptInput.offsetHeight || 124
-        };
+        settings.composerW = COMPOSER_W_DEFAULT;
+        settings.promptH = PROMPT_H_DEFAULT;
+        settings.promptExpanded = false;
+        const node = activeComposerNode();
+        if(node) positionComposerForNode(node);
+        applyPromptHeight();
+        persistActiveSmartSettings();
+        scheduleSave();
     });
 }
+document.getElementById('promptExpandBtn')?.addEventListener('click', e => { e.preventDefault(); togglePromptExpanded(); });
+document.getElementById('promptMoreHint')?.addEventListener('click', e => { e.preventDefault(); setPromptExpanded(true); });
+inputPromptPreview?.addEventListener('click', e => {
+    if(!e.target.closest('[data-upstream-toggle]')) return;
+    e.preventDefault();
+    settings.upstreamExpanded = !settings.upstreamExpanded;
+    renderInputPromptPreview(activeComposerNode() || selectedNode());
+    persistActiveSmartSettings();
+    scheduleSave();
+});
+window.addEventListener('resize', () => { if(composer?.classList?.contains('open')) schedulePromptHeightSync(); });
 runBtn.onclick = runGeneration;
 cascadeRunBtn.onclick = () => {
     const node = selectedNode();
@@ -18916,6 +19066,7 @@ composer.addEventListener('click', event => {
 promptInput.addEventListener('input', maybeOpenMentionPicker);
 promptInput.addEventListener('input', () => {
     delete promptInput.dataset.preserveDraftOnce;
+    schedulePromptHeightSync();
     savePromptDraftForCurrent();
     renderInputThumbsRow(selectedNode());
     scheduleSave();
