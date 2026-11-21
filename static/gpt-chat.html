@@ -16,15 +16,16 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/theme.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/i18n.js?v=2026.11.17.1.1794894627"></script>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.17.1.1794893788">
-    <link rel="stylesheet" href="/static/css/llm-skills.css?v=2026.11.17.1.1794893788">
-    <script src="/static/js/llm-skills.js?v=2026.11.17.1.1794893788"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.21.1.1794902612"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.11.21.1.1794902611"></script>
+    <script src="/static/js/theme.js?v=2026.11.21.1.1795234217"></script>
+    <script src="/static/js/i18n.js?v=2026.11.21.1.1794902556"></script>
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.21.1.1795232862">
+    <link rel="stylesheet" href="/static/css/llm-skills.css?v=2026.11.21.1.1794902531">
+    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.21.1.1795234213">
+    <script src="/static/js/llm-skills.js?v=2026.11.21.1.1794902565"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.11.17.1.1794893788');
+        @import url('/static/vendor/css/fonts.css?v=2026.11.21.1.1794902588');
         :root {
             --ease:cubic-bezier(.4,0,.2,1);
             --chat-bg:#eef2f6;
@@ -51,27 +52,28 @@
         body.studio-theme-dark,
         html.theme-dark,
         body.theme-dark {
-            --chat-bg:#0f141d;
-            --chat-panel:#171d29;
-            --chat-panel-2:#111722;
-            --chat-soft:#1d2533;
-            --chat-line:#2a3444;
-            --chat-line-2:#334155;
-            --chat-text:#e5e9f0;
-            --chat-muted:#98a4b7;
-            --chat-faint:#6f7d91;
-            --chat-strong:#d8dee9;
-            --chat-strong-text:#10141d;
-            --chat-strong-hover:#f1f5f9;
-            --chat-active-bg:#222b3a;
-            --chat-active-text:#e5e9f0;
-            --chat-active-border:#334155;
-            --chat-user-bg:#2f3b52;
-            --chat-user-text:#f1f5f9;
-            --chat-shadow:rgba(0,0,0,.28);
+            --chat-bg:#0e0f12;
+            --chat-panel:#16171c;
+            --chat-panel-2:#121317;
+            --chat-soft:#1e2026;
+            --chat-line:rgba(255,255,255,.08);
+            --chat-line-2:rgba(255,255,255,.14);
+            --chat-text:#f3f4f6;
+            --chat-muted:#a1a1aa;
+            --chat-faint:#71717a;
+            --chat-strong:#f4f4f6;
+            --chat-strong-text:#0e0f12;
+            --chat-strong-hover:#ffffff;
+            --chat-active-bg:#24252c;
+            --chat-active-text:#f4f4f6;
+            --chat-active-border:rgba(255,255,255,.14);
+            --chat-user-bg:#232429;
+            --chat-user-text:#f4f4f5;
+            --chat-shadow:rgba(0,0,0,.42);
         }
         * { box-sizing:border-box; }
-        body { margin:0; height:100vh; overflow:hidden; background:var(--chat-bg); color:var(--chat-text); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+        html { height:100%; overflow:hidden; }
+        body { position:fixed; top:0; left:0; width:100%; margin:0; height:100vh; overflow:hidden; background:var(--chat-bg); color:var(--chat-text); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
         html.studio-ui-scaled body:not(.studio-scale-host) {
             width:calc(100vw / var(--studio-ui-scale, 1)) !important;
         }
@@ -158,9 +160,24 @@
         .assistant .thumb { border-color:var(--chat-line); }
         .composer-wrap { min-height:0; padding:10px 30px 18px; background:linear-gradient(to top,var(--chat-bg) 82%,rgba(238,242,246,0)); border-top:0; z-index:6; }
         .composer { width:min(var(--chat-width),calc(100% - 60px)); margin:0 auto; min-height:0; max-height:min(34vh,310px); background:rgba(248,250,252,.94); border:1px solid var(--chat-line); border-radius:18px; box-shadow:0 14px 36px var(--chat-shadow); padding:8px; display:flex; flex-direction:column; gap:8px; backdrop-filter:blur(14px); overflow:hidden; }
-        .mode-switch { display:none; }
-        .mode-switch button { height:30px; min-width:72px; border-radius:10px; display:flex; align-items:center; justify-content:center; gap:5px; color:var(--chat-muted); background:transparent; font-size:11px; font-weight:800; transition:background .16s var(--ease), color .16s var(--ease), box-shadow .16s var(--ease); }
+        .composer-options { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; flex:0 0 auto; }
+        .mode-switch { display:flex; align-items:center; gap:2px; padding:3px; border:1px solid var(--chat-line); border-radius:8px; background:var(--chat-soft); }
+        .mode-switch button { height:30px; min-width:64px; padding:0 8px; border-radius:6px; display:flex; align-items:center; justify-content:center; gap:5px; color:var(--chat-muted); background:transparent; font-size:11px; font-weight:800; transition:background .16s var(--ease), color .16s var(--ease), box-shadow .16s var(--ease); }
+        .mode-switch svg { width:14px; height:14px; }
         .mode-switch button.active { background:var(--chat-panel); color:var(--chat-text); box-shadow:0 1px 3px rgba(15,23,42,.08); }
+        .thinking-control { display:flex; align-items:center; gap:5px; min-width:0; color:var(--chat-muted); font-size:11px; }
+        .thinking-control svg { width:14px; height:14px; flex:0 0 auto; }
+        .thinking-control select { min-width:0; max-width:112px; height:32px; padding:0 4px; color:var(--chat-text); background:var(--chat-panel); border:1px solid var(--chat-line); border-radius:6px; font-size:11px; }
+        .thinking-control select:disabled { color:var(--chat-faint); }
+        .message-actions { display:flex; align-items:center; gap:4px; margin-top:8px; }
+        .message-actions button { display:flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid transparent; border-radius:6px; background:transparent; color:var(--chat-muted); }
+        .message-actions button:hover { border-color:var(--chat-line); background:var(--chat-soft); color:var(--chat-text); }
+        .message-actions svg { width:14px; height:14px; }
+        .message-detail { margin-top:8px; white-space:normal; color:var(--chat-muted); font-size:12px; }
+        .message-detail summary { cursor:pointer; }
+        .message-detail pre { margin:6px 0 0; font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; max-height:240px; overflow:auto; }
+        .message-status { margin-top:8px; color:var(--chat-muted); font-size:12px; white-space:pre-wrap; }
+        .message-status.error { color:#dc2626; }
         .model-picker { position:relative; z-index:24; width:200px; min-width:190px; max-width:220px; flex:0 0 200px; }
         .model-picker.open { z-index:80; }
         .model-picker-button { width:100%; height:36px; border-radius:12px; border:1px solid var(--chat-line-2); background:rgba(248,250,252,.86); color:var(--chat-text); display:grid; grid-template-columns:18px minmax(0,1fr) 16px; align-items:center; gap:8px; padding:0 10px; box-shadow:0 7px 18px rgba(15,23,42,.08), inset 0 1px 0 rgba(255,255,255,.55); transition:background .16s var(--ease), border-color .16s var(--ease), box-shadow .16s var(--ease), transform .16s var(--ease); }
@@ -272,7 +289,7 @@
         html.studio-theme-dark body .topbar,
         body.studio-theme-dark .topbar,
         html.theme-dark body .topbar,
-        body.theme-dark .topbar { background:rgba(15,20,29,.78) !important; border-color:var(--chat-line) !important; }
+        body.theme-dark .topbar { background:rgba(14,15,18,.88) !important; border-color:var(--chat-line) !important; }
         html.studio-theme-dark body .composer,
         body.studio-theme-dark .composer,
         html.theme-dark body .composer,
@@ -292,11 +309,11 @@
         html.studio-theme-dark body .system-prompt-popover,
         body.studio-theme-dark .system-prompt-popover,
         html.theme-dark body .system-prompt-popover,
-        body.theme-dark .system-prompt-popover { background:rgba(23,29,41,.96) !important; border-color:var(--chat-line) !important; box-shadow:0 22px 54px rgba(0,0,0,.36) !important; color:var(--chat-text) !important; }
+        body.theme-dark .system-prompt-popover { background:rgba(21,22,27,.97) !important; border-color:var(--chat-line) !important; box-shadow:0 24px 60px rgba(0,0,0,.52) !important; color:var(--chat-text) !important; }
         html.studio-theme-dark body .composer-wrap,
         body.studio-theme-dark .composer-wrap,
         html.theme-dark body .composer-wrap,
-        body.theme-dark .composer-wrap { background:linear-gradient(to top,var(--chat-bg) 82%,rgba(15,20,29,0)) !important; border-color:transparent !important; }
+        body.theme-dark .composer-wrap { background:linear-gradient(to top,var(--chat-bg) 82%,rgba(14,15,18,0)) !important; border-color:transparent !important; }
         html.studio-theme-dark body .composer-body,
         body.studio-theme-dark .composer-body,
         html.theme-dark body .composer-body,
@@ -304,7 +321,7 @@
         html.studio-theme-dark body .image-preview-close,
         body.studio-theme-dark .image-preview-close,
         html.theme-dark body .image-preview-close,
-        body.theme-dark .image-preview-close { background:rgba(23,29,41,.92) !important; color:var(--chat-text) !important; border-color:var(--chat-line) !important; }
+        body.theme-dark .image-preview-close { background:rgba(22,23,28,.92) !important; color:var(--chat-text) !important; border-color:var(--chat-line) !important; }
         html.studio-theme-dark body .messages,
         body.studio-theme-dark .messages,
         html.theme-dark body .messages,
@@ -328,7 +345,7 @@
         html.theme-dark body .model-picker-button,
         html.theme-dark body .upload-btn,
         body.theme-dark .model-picker-button,
-        body.theme-dark .upload-btn { background:rgba(17,23,34,.86) !important; border-color:var(--chat-line-2) !important; color:var(--chat-text) !important; box-shadow:0 10px 24px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.04) !important; }
+        body.theme-dark .upload-btn { background:rgba(30,32,38,.88) !important; border-color:var(--chat-line-2) !important; color:var(--chat-text) !important; box-shadow:0 8px 20px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.04) !important; }
         html.studio-theme-dark body .model-picker-button:hover,
         html.studio-theme-dark body .upload-btn:hover,
         body.studio-theme-dark .model-picker-button:hover,
@@ -340,7 +357,7 @@
         html.studio-theme-dark body .model-picker-popover,
         body.studio-theme-dark .model-picker-popover,
         html.theme-dark body .model-picker-popover,
-        body.theme-dark .model-picker-popover { background:rgba(23,29,41,.96) !important; border-color:var(--chat-line) !important; box-shadow:0 22px 54px rgba(0,0,0,.36) !important; color:var(--chat-text) !important; }
+        body.theme-dark .model-picker-popover { background:rgba(21,22,27,.97) !important; border-color:var(--chat-line) !important; box-shadow:0 24px 60px rgba(0,0,0,.52) !important; color:var(--chat-text) !important; }
         html.studio-theme-dark body .model-picker-head,
         body.studio-theme-dark .model-picker-head,
         html.theme-dark body .model-picker-head,
@@ -421,15 +438,16 @@
             .messages { width:calc(100% - 28px); padding:20px 0 12px; scrollbar-gutter:auto; }
             .composer-wrap { padding:8px 14px 12px; }
             .composer { width:100%; }
-            .composer { min-height:0; max-height:min(38vh,290px); border-radius:16px; }
+            .composer { min-height:0; max-height:min(42vh,320px); border-radius:16px; }
             .composer-body { min-height:0; }
             textarea { min-height:36px; max-height:84px; }
-            .inline-controls { align-items:stretch; flex-direction:column; flex:1; }
-            .model-picker { width:100%; min-width:0; max-width:none; flex-basis:auto; }
+            .mode-switch button { min-width:54px; padding:0 5px; }
+            .inline-controls { align-items:center; flex-direction:row; flex:1; }
+            .model-picker { width:auto; min-width:0; max-width:none; flex:1 1 144px; }
             .model-picker-popover { left:0; right:0; width:100%; max-height:360px; }
             .model-picker-body { grid-template-columns:1fr; }
             .model-picker-list + .model-picker-list { border-left:0; border-top:1px solid var(--chat-line); }
-            .image-controls { align-items:stretch; flex-direction:column; gap:5px; }
+            .image-controls { align-items:center; flex-direction:row; gap:5px; }
             .resolution-picker { width:100%; min-width:0; max-width:none; flex-basis:auto; }
             .resolution-picker-popover { left:0; right:0; width:100%; max-height:360px; }
             .resolution-picker-pane.preset { grid-template-columns:1fr; }
@@ -505,6 +523,22 @@
 
             <div class="composer-wrap">
                 <div class="composer">
+                    <div class="composer-options">
+                            <div class="mode-switch" role="group" aria-label="对话模式">
+                                <button id="chatModeBtn" type="button" onclick="setMode('chat')" title="文字对话"><i data-lucide="message-square"></i><span>文字</span></button>
+                                <button id="agentModeBtn" type="button" onclick="setMode('agent')" title="智能选择聊天或生图"><i data-lucide="sparkles"></i><span>智能</span></button>
+                                <button id="imageModeBtn" type="button" onclick="setMode('image')" title="按输入文案直接生图"><i data-lucide="image"></i><span>生图</span></button>
+                            </div>
+                            <label id="thinkingControl" class="thinking-control">
+                                <i data-lucide="brain"></i>
+                                <select id="reasoningEffortSelect" aria-label="思考强度" onchange="setReasoningEffort(this.value)">
+                                    <option value="">默认思考</option>
+                                    <option value="low">轻量思考</option>
+                                    <option value="medium">标准思考</option>
+                                    <option value="high">深入思考</option>
+                                </select>
+                            </label>
+                    </div>
                     <div id="composerBody" class="composer-body">
                         <textarea id="messageInput" rows="4" placeholder="输入消息，Enter 发送..." data-i18n-placeholder="chat.inputPlaceholder" oninput="autoGrow(this)" onkeydown="handleKey(event)"></textarea>
                         <div id="refStrip" class="ref-strip"></div>
@@ -679,7 +713,9 @@
         const savedChatSettings = readChatSettings();
         let conversations = [];
         let currentConversation = null;
-        let mode = 'agent';
+        let mode = ['chat','agent','image'].includes(savedChatSettings.mode) ? savedChatSettings.mode : 'agent';
+        let reasoningEffort = ['low','medium','high'].includes(savedChatSettings.reasoningEffort) ? savedChatSettings.reasoningEffort : '';
+        let sending = false;
         let provider = savedChatSettings.provider || 'comfly';
         let msModel = savedChatSettings.msModel || '';
         let activeChatModel = savedChatSettings.activeChatModel || '';
@@ -736,6 +772,7 @@
             try {
                 localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify({
                     mode,
+                    reasoningEffort,
                     provider,
                     msModel,
                     activeChatModel,
@@ -854,6 +891,7 @@
             if(kind !== 'image' && !models.includes(activeChatModel)) activeChatModel = chatProviderModels[provider] && models.includes(chatProviderModels[provider]) ? chatProviderModels[provider] : (models[0] || config.chat_model);
             if(kind !== 'image' && provider === 'modelscope') msModel = activeChatModel;
             renderModelPicker();
+            updateReasoningControl();
         }
 
         function validateSavedProviderState(){
@@ -1167,6 +1205,7 @@
         });
 
         function setMode(next, persist = true){
+            if(!['chat','agent','image'].includes(next)) return;
             mode = next;
             if(next === 'chat') modelPickerScope = 'chat';
             if(next === 'image') modelPickerScope = 'image';
@@ -1175,10 +1214,36 @@
             document.getElementById('chatModeBtn')?.classList.toggle('active', next === 'chat');
             document.getElementById('agentModeBtn')?.classList.toggle('active', next === 'agent');
             document.getElementById('imageModeBtn')?.classList.toggle('active', next === 'image');
+            ['chat','agent','image'].forEach(value => {
+                document.getElementById(`${value}ModeBtn`)?.setAttribute('aria-pressed', String(value === next));
+            });
             document.getElementById('imageControls')?.classList.toggle('hidden', next === 'chat');
             renderProviderControls();
             updateModelLabel();
             if(persist) saveChatSettings();
+        }
+
+        function supportsReasoningEffort(){
+            const protocol = String(providerById(provider, 'chat')?.protocol || '').toLowerCase();
+            const model = String(activeChatModel || config.chat_model || '').toLowerCase().split('/').pop();
+            return !['codex','gemini-cli'].includes(protocol)
+                && /^(gpt-[56](?:[.\-]|$)|o[134](?:-|$))/.test(model)
+                && !/(chat-latest|realtime|audio|image|-pro|o1-mini|o1-preview)/.test(model);
+        }
+
+        function updateReasoningControl(){
+            const select = document.getElementById('reasoningEffortSelect');
+            const control = document.getElementById('thinkingControl');
+            if(!select || !control) return;
+            const supported = mode !== 'image' && supportsReasoningEffort();
+            select.disabled = sending || !supported;
+            select.value = supported ? reasoningEffort : '';
+            control.title = supported ? '思考强度由当前 API 线路支持；摘要在接口返回时显示' : '当前模式或模型不支持设置思考强度';
+        }
+
+        function setReasoningEffort(value){
+            reasoningEffort = ['low','medium','high'].includes(value) ? value : '';
+            saveChatSettings();
         }
 
         function updateModelLabel(){
@@ -1420,6 +1485,31 @@
                 });
                 bubble.appendChild(grid);
             }
+            if(msg.reasoning) setMessageDetail(bubble, 'reasoning-detail', '思考摘要', msg.reasoning);
+            if(msg.type === 'image' && msg.content) setMessageDetail(bubble, 'prompt-detail', '生图文案', msg.content);
+            const status = document.createElement('div');
+            status.className = 'message-status';
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.hidden = true;
+            bubble.appendChild(status);
+            if(msg.role === 'assistant' && msg.content){
+                const actions = document.createElement('div');
+                actions.className = 'message-actions';
+                [
+                    {icon:'pencil', title:msg.type === 'image' ? '编辑生图文案' : '编辑文案', image:msg.type === 'image'},
+                    {icon:'image-plus', title:'用于生图', image:true}
+                ].forEach(action => {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.title = action.title;
+                    button.setAttribute('aria-label', action.title);
+                    button.innerHTML = `<i data-lucide="${action.icon}"></i>`;
+                    button.onclick = () => editMessageDraft(msg, action.image);
+                    actions.appendChild(button);
+                });
+                bubble.appendChild(actions);
+            }
             // Show model badge for assistant messages
             if(msg.role === 'assistant' && msg.model){
                 const badge = document.createElement('div');
@@ -1432,7 +1522,53 @@
             row.appendChild(bubble);
             box.appendChild(row);
             lucide.createIcons();
-            return {row, bubble, text};
+            return {row, bubble, text, status};
+        }
+
+        function setMessageDetail(bubble, className, title, content){
+            let detail = bubble.querySelector(`.${className}`);
+            if(!detail){
+                detail = document.createElement('details');
+                detail.className = `message-detail ${className}`;
+                const summary = document.createElement('summary');
+                summary.textContent = title;
+                detail.appendChild(summary);
+                detail.appendChild(document.createElement('pre'));
+                bubble.appendChild(detail);
+            }
+            detail.querySelector('pre').textContent = content;
+            return detail;
+        }
+
+        function appendStreamImage(assistantBubble, url){
+            if(!url) return;
+            assistantBubble.bubble.classList.add('image-bubble');
+            let grid = assistantBubble.bubble.querySelector('.generated-grid');
+            if(!grid){
+                grid = document.createElement('div');
+                assistantBubble.bubble.insertBefore(grid, assistantBubble.status);
+            }
+            const img = document.createElement('img');
+            img.className = 'generated';
+            img.alt = '生成图片';
+            img.src = url;
+            img.onclick = () => openImagePreview(url);
+            grid.appendChild(img);
+            grid.className = `generated-grid count-${Math.min(grid.children.length, 4)}`;
+        }
+
+        function editMessageDraft(msg, image = false){
+            if(sending) return;
+            const input = document.getElementById('messageInput');
+            input.value = msg.content || '';
+            if(image && !refs.length && msg.used_references?.length){
+                refs = msg.used_references.slice(0, CHAT_ATTACHMENT_MAX);
+                renderRefs();
+            }
+            setMode(image ? 'image' : 'chat');
+            autoGrow(input);
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
         }
 
         function openImagePreview(url){
@@ -1538,17 +1674,25 @@
             body.classList.toggle('has-overflow', body.scrollHeight > body.clientHeight + 2);
         }
         function autoGrow(el){ el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 150) + 'px'; updateComposerOverflow(); }
-        function handleKey(e){ if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); } }
+        function handleKey(e){ if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendMessage(); } }
         window.addEventListener('keydown', e => {
             if(e.key === 'Escape') closeImagePreview();
         });
 
         async function sendMessage(){
+            if(sending) return;
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
             if(!message) return;
-            const btn = document.getElementById('sendBtn');
-            btn.disabled = true;
+            sending = true;
+            const requestMode = mode;
+            const requestSystemPrompt = currentSystemPrompt();
+            toggleModelPicker(false);
+            toggleResolutionPicker(false);
+            toggleHistory(false);
+            toggleSystemPrompt(false);
+            const busyControls = [...document.querySelectorAll('.composer button, .composer select, .top-actions > .action-btn')].filter(control => !control.disabled);
+            busyControls.forEach(control => { control.disabled = true; });
             const requestedSize = chatSizeFromPrompt(message);
             const pendingRefs = refs.slice();
             refs = [];
@@ -1559,87 +1703,49 @@
                 currentConversation = {id:'', title:'新对话', messages:[]};
                 document.getElementById('messages').innerHTML = '';
             }
+            document.querySelector('#messages .empty-state')?.remove();
             addMessageBubble({role:'user', content:message, attachments:pendingRefs});
-            const useStreaming = mode === 'chat';
-            const pendingText = mode === 'image' ? tr('chat.generatingImage') : (useStreaming ? '' : (mode === 'agent' ? tr('chat.agentWorking') : ''));
-            const assistantBubble = addMessageBubble({role:'assistant', content: pendingText});
-            if(useStreaming || mode === 'agent') assistantBubble.bubble.classList.add('streaming');
+            const assistantBubble = addMessageBubble({role:'assistant', content:''});
+            assistantBubble.bubble.classList.add('streaming');
+            let stageMessage = requestMode === 'image' ? tr('chat.generatingImage') : '正在连接…';
+            const startedAt = Date.now();
+            const updateStatus = () => {
+                assistantBubble.status.hidden = false;
+                assistantBubble.status.textContent = `${stageMessage} · ${Math.floor((Date.now() - startedAt) / 1000)} 秒`;
+            };
+            assistantBubble.setStatus = value => { stageMessage = value; updateStatus(); };
+            updateStatus();
+            const statusTimer = setInterval(updateStatus, 1000);
             scrollBottom();
             try {
-                if((mode === 'chat' || mode === 'agent') && !selectedProviderHasModels('chat')) throw new Error('当前对话线路没有可用的聊天模型，请先切换对话线路。');
-                if(mode === 'image' && !selectedProviderHasModels('image')) throw new Error('当前生图线路没有可用的生图模型，请先切换生图线路。');
+                if(requestMode !== 'image' && !selectedProviderHasModels('chat')) throw new Error('当前对话线路没有可用的聊天模型，请先切换对话线路。');
+                if(requestMode === 'image' && !selectedProviderHasModels('image')) throw new Error('当前生图线路没有可用的生图模型，请先切换生图线路。');
                 const requestResolution = chatResolutionForRequest(message, requestedSize);
                 const requestAspectRatio = currentChatAspectRatio();
-                if(useStreaming) {
-                    await streamChatMessage(message, pendingRefs, assistantBubble);
-                } else if(mode === 'chat') {
-                    const data = await fetch('/api/chat', {
-                        method:'POST',
-                        headers:headers(),
-                        body:JSON.stringify({
-                            conversation_id: currentConversation.id || '',
-                            message,
-                            system_prompt: currentSystemPrompt(),
-                            skill_ids: chatSkillIds,
-                            mode:'chat',
-                            size: requestedSize,
-                            aspect_ratio: requestAspectRatio,
-                            resolution: requestResolution,
-                            model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
-                            ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
-                            reference_images: pendingRefs,
-                            provider,
-                        })
-                    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('chat.requestFailed'))); return r.json(); });
-                    currentConversation = data.conversation;
-                    rememberConversation(currentConversation.id);
-                    setChatTitle(currentConversation.title);
-                    renderMessages(currentConversation.messages || []);
-                    await loadConversations();
-                } else if(mode === 'agent') {
-                    const data = await fetch('/api/chat/agent', {
-                        method:'POST',
-                        headers:headers(),
-                        body:JSON.stringify({
-                            conversation_id: currentConversation.id || '',
-                            message,
-                            system_prompt: currentSystemPrompt(),
-                            skill_ids: chatSkillIds,
-                            mode:'agent',
-                            size: requestedSize,
-                            aspect_ratio: requestAspectRatio,
-                            resolution: requestResolution,
-                            model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
-                            ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
-                            image_model: activeImageModel || config.image_model,
-                            reference_images: pendingRefs,
-                            provider,
-                            image_provider: activeImageProvider,
-                        })
-                    }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('chat.requestFailed'))); return r.json(); });
-                    currentConversation = data.conversation;
-                    rememberConversation(currentConversation.id);
-                    setChatTitle(currentConversation.title);
-                    renderMessages(currentConversation.messages || []);
-                    await loadConversations();
+                const payload = {
+                    conversation_id: currentConversation.id || '',
+                    message,
+                    system_prompt: requestSystemPrompt,
+                    skill_ids: chatSkillIds,
+                    mode: requestMode,
+                    size: requestedSize,
+                    aspect_ratio: requestAspectRatio,
+                    resolution: requestResolution,
+                    model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
+                    ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
+                    image_model: activeImageModel || config.image_model,
+                    reference_images: pendingRefs,
+                    provider: requestMode === 'image' ? activeImageProvider : provider,
+                    image_provider: activeImageProvider,
+                    reasoning_effort: requestMode !== 'image' && supportsReasoningEffort() ? reasoningEffort : ''
+                };
+                if(requestMode !== 'image'){
+                    await streamChatMessage(payload, assistantBubble);
                 } else {
                     const data = await fetch('/api/chat', {
                         method:'POST',
                         headers:headers(),
-                        body:JSON.stringify({
-                            conversation_id: currentConversation.id || '',
-                            message,
-                            system_prompt: currentSystemPrompt(),
-                            skill_ids: chatSkillIds,
-                            mode,
-                            size: requestedSize,
-                            aspect_ratio: requestAspectRatio,
-                            resolution: requestResolution,
-                            model: activeChatModel || config.chat_model,
-                            image_model: activeImageModel || config.image_model,
-                            reference_images: pendingRefs,
-                            provider: activeImageProvider,
-                        })
+                        body:JSON.stringify(payload)
                     }).then(async r => { if(!r.ok) throw new Error(await responseErrorMessage(r, tr('chat.requestFailed'))); return r.json(); });
                     currentConversation = data.conversation;
                     rememberConversation(currentConversation.id);
@@ -1648,70 +1754,96 @@
                     await loadConversations();
                 }
             } catch(err) {
-                renderMessages([...(currentConversation.messages || []), {role:'assistant', content:err.message || tr('chat.requestFailed')}]);
+                clearInterval(statusTimer);
+                assistantBubble.status.hidden = false;
+                assistantBubble.status.classList.add('error');
+                assistantBubble.status.textContent = err.message || tr('chat.requestFailed');
             } finally {
-                btn.disabled = false;
+                clearInterval(statusTimer);
+                assistantBubble.bubble.classList.remove('streaming');
+                sending = false;
+                busyControls.forEach(control => { control.disabled = false; });
+                updateReasoningControl();
                 scrollBottom();
             }
         }
 
-        async function streamChatMessage(message, pendingRefs, assistantBubble){
-            const currentProvider = provider;
-            const currentMsModel = provider === 'modelscope' ? (msModel || activeChatModel || (config.ms_chat_models?.[0] || '')) : '';
-            const currentChatModel = activeChatModel || config.chat_model;
-
+        async function streamChatMessage(payload, assistantBubble){
             const res = await fetch('/api/chat/stream', {
                 method:'POST',
                 headers:headers(),
-                body:JSON.stringify({
-                    conversation_id: currentConversation.id || '',
-                    message,
-                    system_prompt: currentSystemPrompt(),
-                    skill_ids: chatSkillIds,
-                    mode:'chat',
-                    model: currentProvider === 'modelscope' ? currentMsModel : currentChatModel,
-                    ms_model: currentProvider === 'modelscope' ? currentMsModel : '',
-                    provider: currentProvider,
-                    reference_images: pendingRefs
-                })
+                body:JSON.stringify(payload)
             });
             if(!res.ok) throw new Error(await responseErrorMessage(res, tr('chat.requestFailed')));
+            if(!res.body) throw new Error('浏览器未提供流式响应，请刷新后重试。');
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
             let fullText = '';
-            while(true){
-                const {value, done} = await reader.read();
-                if(done) break;
-                buffer += decoder.decode(value, {stream:true});
-                const events = buffer.split('\n\n');
-                buffer = events.pop() || '';
-                for(const eventText of events){
-                    const line = eventText.split('\n').find(item => item.startsWith('data:'));
-                    if(!line) continue;
-                    const event = JSON.parse(line.slice(5).trim());
-                    if(event.type === 'meta'){
+            let reasoning = '';
+            let completed = false;
+            const handleEvent = async eventText => {
+                    const data = eventText.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+                    if(!data || data === '[DONE]') return;
+                    const event = JSON.parse(data);
+                    if(event.type === 'meta' || event.type === 'partial'){
                         currentConversation = event.conversation;
                         rememberConversation(currentConversation.id);
                         setChatTitle(currentConversation.title);
+                    }
+                    if(event.type === 'status') assistantBubble.setStatus(event.message || '正在处理…');
+                    if(event.type === 'plan'){
+                        if(event.action !== 'chat'){
+                            assistantBubble.text.textContent = event.reply || (event.action === 'edit_image' ? '正在修改图片' : '正在生成图片');
+                            if(event.prompt) setMessageDetail(assistantBubble.bubble, 'prompt-detail', '生图文案', event.prompt);
+                        }
+                        scrollBottom();
                     }
                     if(event.type === 'delta'){
                         fullText += event.delta || '';
                         assistantBubble.text.textContent = fullText;
                         scrollBottom();
                     }
+                    if(event.type === 'reasoning'){
+                        reasoning += event.delta || '';
+                        setMessageDetail(assistantBubble.bubble, 'reasoning-detail', '思考摘要', reasoning);
+                        scrollBottom();
+                    }
+                    if(event.type === 'image'){
+                        appendStreamImage(assistantBubble, event.url);
+                        scrollBottom();
+                    }
                     if(event.type === 'error') throw new Error(event.detail || tr('chat.requestFailed'));
                     if(event.type === 'done'){
+                        completed = true;
                         assistantBubble.bubble.classList.remove('streaming');
                         currentConversation = event.conversation;
                         rememberConversation(currentConversation.id);
                         setChatTitle(currentConversation.title);
                         renderMessages(currentConversation.messages || []);
-                        await loadConversations();
+                        await loadConversations().catch(() => {});
+                    }
+            };
+            try {
+                while(!completed){
+                    const {value, done} = await reader.read();
+                    buffer += done ? decoder.decode() : decoder.decode(value, {stream:true});
+                    let separator;
+                    while((separator = /\r?\n\r?\n/.exec(buffer))){
+                        const eventText = buffer.slice(0, separator.index);
+                        buffer = buffer.slice(separator.index + separator[0].length);
+                        await handleEvent(eventText);
+                    }
+                    if(done){
+                        if(buffer.trim()) await handleEvent(buffer);
+                        break;
                     }
                 }
+                if(!completed) throw new Error('连接已中断，已收到的内容已保留。请检查历史记录后再决定是否重试。');
+            } finally {
+                await reader.cancel().catch(() => {});
+                reader.releaseLock();
             }
-            assistantBubble.bubble.classList.remove('streaming');
         }
 
         function scrollBottom(){ requestAnimationFrame(() => { const box = document.getElementById('messages'); box.scrollTop = box.scrollHeight; }); }

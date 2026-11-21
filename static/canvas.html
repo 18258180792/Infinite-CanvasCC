@@ -8,6 +8,15 @@
     <script>
         (function(){
             try {
+                var qs = new URLSearchParams(window.location.search);
+                if(qs.get('id')) {
+                    window.location.replace('/static/smart-canvas.html' + window.location.search);
+                    return;
+                }
+                window.location.replace('/static/canvas-list.html' + window.location.search);
+                return;
+            } catch(e) {}
+            try {
                 var theme = localStorage.getItem('studio_theme') || localStorage.getItem('canvas_theme') || 'light';
                 if(theme === 'dark') {
                     document.documentElement.classList.add('studio-theme-dark');
@@ -16,13 +25,13 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/theme.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/touch-mouse.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/i18n.js?v=2026.11.17.1.1794894627"></script>
-    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.11.17.1.1794893788">
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.17.1.1794893788">
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.21.1.1794902612"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.11.21.1.1794902611"></script>
+    <script src="/static/js/theme.js?v=2026.11.21.1.1795234217"></script>
+    <script src="/static/js/touch-mouse.js?v=2026.11.21.1.1794902574"></script>
+    <script src="/static/js/i18n.js?v=2026.11.21.1.1794902556"></script>
+    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.11.21.1.1794902529">
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.21.1.1795232862">
 </head>
 <body>
     <div id="shell" class="shell no-canvas">
@@ -353,7 +362,7 @@
         </div>
     </div>
 
-    <script src="/static/js/ltx-director-timeline.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/canvas.js?v=2026.11.17.1.1794893788"></script>
+    <script src="/static/js/ltx-director-timeline.js?v=2026.11.21.1.1794902566"></script>
+    <script src="/static/js/canvas.js?v=2026.11.21.1.1794902551"></script>
 </body>
 </html>

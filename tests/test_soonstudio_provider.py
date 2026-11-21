@@ -56,7 +56,7 @@ class SoonStudioProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image, {"type": "url", "value": IMAGE_URL})
         self.assertEqual(raw["status"], "SUCCESS")
         self.assertEqual(len(self.requests), 2)
-        self.assertFalse(client_options[0]["trust_env"])
+        self.assertTrue(client_options[0]["trust_env"])
         self.assertEqual(self.requests[0].url.path, "/v1/images/generations")
         self.assertEqual(self.requests[0].url.params["async"], "true")
         self.assertEqual(self.requests[1].url.path, "/v1/images/tasks/task-123")
@@ -67,7 +67,7 @@ class SoonStudioProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(main.is_soonstudio_provider({"base_url": "https://api.soonstudio.ai.evil.test/v1"}))
         self.assertFalse(main.looks_like_generated_image_url("https://example.test/api/media/token"))
 
-    async def test_image_edit_uses_direct_connection(self):
+    async def test_image_edit_uses_proxy_fast_channel_by_default_and_supports_direct_override(self):
         client_options = []
         requests = []
 
@@ -92,10 +92,20 @@ class SoonStudioProviderTests(unittest.IsolatedAsyncioTestCase):
                     "edit", "1024x1024", "", "gpt-image-2",
                     reference_images=[{"url": "/output/input.png"}], provider_id="custom-api-3",
                 )
+            direct_provider = {**self.provider, "proxy_mode": "direct"}
+            with patch.object(main, "get_api_provider", return_value=direct_provider), \
+                 patch.object(main, "provider_env_key_value", return_value="test-key"), \
+                 patch.object(main, "output_file_from_url", return_value=str(image_path)), \
+                 patch.object(main.httpx, "AsyncClient", side_effect=client_factory):
+                await main.generate_ai_image(
+                    "edit", "1024x1024", "", "gpt-image-2",
+                    reference_images=[{"url": "/output/input.png"}], provider_id="custom-api-3",
+                )
 
         self.assertEqual(image["value"], "https://example.test/result.png")
-        self.assertFalse(client_options[0]["trust_env"])
-        self.assertEqual(len(requests), 1)
+        self.assertTrue(client_options[0]["trust_env"])
+        self.assertFalse(client_options[1]["trust_env"])
+        self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0].url.path, "/v1/images/edits")
         self.assertEqual(requests[0].url.params["async"], "true")
 

@@ -9,6 +9,7 @@ canvas/cowart-selection.json
 canvas/cowart-view-state.json
 data/api_providers.json
 data/conversations/
+data/logs/
 data/projects.json
 data/prompt_libraries.json
 

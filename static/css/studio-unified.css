@@ -1,0 +1,1253 @@
+/* ==========================================================================
+   LibTV Studio Unified Design System — Applied Across All AI Studio Pages
+   Unifies: Outer Shell (index.html), Project Workspace (canvas-list),
+   Smart Infinite Canvas (smart-canvas), GPT Chat, Asset Library,
+   Local & Online Generators (zimage / enhance / klein / angle / online),
+   and Settings (api-settings / comfyui-settings).
+   ========================================================================== */
+
+:root {
+    --lib-font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Inter", "Microsoft YaHei", sans-serif;
+    --lib-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+    /* Daylight Studio Tokens */
+    --lib-bg-root: #f4f5f7;
+    --lib-bg-rail: #f8f9fb;
+    --lib-bg-panel: rgba(255, 255, 255, 0.94);
+    --lib-bg-card: #ffffff;
+    --lib-bg-soft: #f1f3f6;
+    --lib-bg-hover: rgba(15, 23, 42, 0.055);
+    --lib-border: rgba(15, 23, 42, 0.08);
+    --lib-border-strong: rgba(15, 23, 42, 0.16);
+    --lib-text: #141519;
+    --lib-text-sub: #52525b;
+    --lib-text-muted: #8e8e98;
+    --lib-cta-bg: #141519;
+    --lib-cta-fg: #ffffff;
+    --lib-accent: #0284c7;
+    --lib-grid-dot: rgba(15, 23, 42, 0.09);
+}
+
+html.theme-dark,
+html.studio-theme-dark,
+body.theme-dark,
+body.studio-theme-dark {
+    /* LibTV Obsidian Studio Tokens */
+    --lib-bg-root: #0e0f12;
+    --lib-bg-rail: #0b0c0f;
+    --lib-bg-panel: rgba(21, 22, 27, 0.94);
+    --lib-bg-card: #16171c;
+    --lib-bg-soft: #1e2026;
+    --lib-bg-hover: rgba(255, 255, 255, 0.065);
+    --lib-border: rgba(255, 255, 255, 0.075);
+    --lib-border-strong: rgba(255, 255, 255, 0.15);
+    --lib-text: #f3f4f6;
+    --lib-text-sub: #a1a1aa;
+    --lib-text-muted: #71717a;
+    --lib-cta-bg: #f4f4f6;
+    --lib-cta-fg: #0e0f12;
+    --lib-accent: #38bdf8;
+    --lib-grid-dot: rgba(255, 255, 255, 0.055);
+}
+
+/* --- 1. Global Typography & Ultra-Slim Scrollbars --- */
+body {
+    font-family: var(--lib-font-sans) !important;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+*::-webkit-scrollbar {
+    width: 6px !important;
+    height: 6px !important;
+}
+
+html.theme-dark *::-webkit-scrollbar-thumb,
+html.studio-theme-dark *::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.16) !important;
+    border: 1px solid transparent !important;
+    border-radius: 999px !important;
+}
+
+html.theme-dark *::-webkit-scrollbar-thumb:hover,
+html.studio-theme-dark *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.28) !important;
+}
+
+/* --- 2. Outer Studio Shell (`index.html` — LibTV Slim Rail & Full-Bleed Stage) --- */
+.app-shell {
+    background: var(--lib-bg-root) !important;
+}
+
+.app-shell > .sidebar {
+    width: 62px !important;
+    min-width: 62px !important;
+    padding: 18px 0 14px !important;
+    background: var(--lib-bg-rail) !important;
+    border-right: 1px solid var(--lib-border) !important;
+}
+
+.app-shell > .sidebar:hover,
+.app-shell > .sidebar.is-pinned {
+    width: 204px !important;
+}
+
+.app-shell > .sidebar .mb-12 {
+    margin-bottom: 18px !important;
+}
+
+.app-shell > .sidebar .logo-ring {
+    width: 34px !important;
+    height: 34px !important;
+    border-radius: 10px !important;
+    border-width: 1.75px !important;
+    border-color: var(--lib-text) !important;
+}
+
+.app-shell > .sidebar .nav-item {
+    width: 40px !important;
+    height: 40px !important;
+    flex: 0 0 40px !important;
+    margin: 3px 0 !important;
+    padding-left: 10px !important;
+    border-radius: 10px !important;
+    color: var(--lib-text-sub) !important;
+}
+
+.app-shell > .sidebar .nav-fold-toggle {
+    width: 40px !important;
+    height: 32px !important;
+    flex: 0 0 32px !important;
+    margin: 0 0 4px !important;
+    padding-left: 11px !important;
+    border-radius: 9px !important;
+    border-color: transparent !important;
+    color: var(--lib-text-muted) !important;
+}
+
+.app-shell > .sidebar:hover .nav-item,
+.app-shell > .sidebar.is-pinned .nav-item,
+.app-shell > .sidebar:hover .nav-fold-toggle,
+.app-shell > .sidebar.is-pinned .nav-fold-toggle {
+    width: 180px !important;
+}
+
+.app-shell > .sidebar .nav-text {
+    margin-left: 12px !important;
+    font-size: 13px !important;
+    font-weight: 550 !important;
+}
+
+.app-shell > .sidebar .nav-item:hover,
+.app-shell > .sidebar .nav-fold-toggle:hover {
+    background: var(--lib-bg-hover) !important;
+    color: var(--lib-text) !important;
+}
+
+html.theme-dark .app-shell > .sidebar .nav-item.active,
+html.studio-theme-dark .app-shell > .sidebar .nav-item.active {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #ffffff !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .app-shell > .sidebar .nav-item.active {
+    background: #141519 !important;
+    color: #ffffff !important;
+    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12) !important;
+}
+
+.app-shell > .sidebar .side-actions {
+    gap: 5px !important;
+    margin-bottom: 8px !important;
+}
+
+.app-shell > .sidebar .side-pill {
+    width: 40px !important;
+    height: 34px !important;
+    border-radius: 9px !important;
+    border-color: transparent !important;
+    color: var(--lib-text-sub) !important;
+}
+
+.app-shell > .sidebar:hover .side-pill,
+.app-shell > .sidebar.is-pinned .side-pill {
+    width: 180px !important;
+}
+
+.app-shell > .sidebar .side-pill:hover {
+    background: var(--lib-bg-hover) !important;
+    color: var(--lib-text) !important;
+}
+
+html.theme-dark .app-shell > .sidebar .side-pill.active,
+html.studio-theme-dark .app-shell > .sidebar .side-pill.active {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Seamless LibTV Full-Bleed Workspace Stage (removes chunky outer frame & rounded corners) */
+.app-shell > .stage {
+    margin: 0 !important;
+    border-radius: 0 !important;
+    border: none !important;
+    background: var(--lib-bg-root) !important;
+    box-shadow: none !important;
+}
+
+/* --- 3. Smart Infinite Canvas (`smart-canvas.html` — LibTV Obsidian Header, Nodes & Composer) --- */
+html.theme-dark .shell,
+html.studio-theme-dark .shell {
+    --page: #0e0f12 !important;
+    --grid: rgba(255, 255, 255, 0.055) !important;
+    --panel: rgba(21, 22, 27, 0.94) !important;
+    --card: #17181e !important;
+    --text: #f3f4f6 !important;
+    --muted: #a1a1aa !important;
+    --faint: #71717a !important;
+    --line: rgba(255, 255, 255, 0.08) !important;
+    --soft: #1e2026 !important;
+    --shadow: rgba(0, 0, 0, 0.48) !important;
+    --strong: #f4f4f6 !important;
+    --strong-text: #0e0f12 !important;
+    background-color: #0e0f12 !important;
+}
+
+html.theme-dark .shell::before,
+html.studio-theme-dark .shell::before {
+    background: radial-gradient(960px 440px at 50% -12%, rgba(255, 255, 255, 0.035), transparent 70%) !important;
+}
+
+/* Unified Compact 34px LibTV Top Bar in Smart Canvas */
+.smart-back,
+.smart-log-toggle,
+.smart-shortcut-toggle,
+.smart-workflow-toggle,
+.asset-toggle {
+    top: 14px !important;
+    height: 34px !important;
+    border-radius: 10px !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24) !important;
+}
+
+.smart-back {
+    left: 16px !important;
+    padding: 0 12px !important;
+}
+
+.smart-title {
+    left: 262px !important;
+    top: 22px !important;
+    font-size: 12.5px !important;
+    font-weight: 600 !important;
+    color: var(--lib-text-sub) !important;
+    max-width: min(320px, calc(100vw - 640px)) !important;
+}
+
+@media (max-width: 1120px) {
+    .smart-title {
+        display: none !important;
+    }
+}
+
+.asset-toggle {
+    right: 16px !important;
+    width: auto !important;
+    min-width: 82px !important;
+    padding: 0 12px !important;
+}
+
+.smart-log-toggle {
+    right: 106px !important;
+    width: auto !important;
+    min-width: 76px !important;
+    padding: 0 12px !important;
+}
+
+.smart-shortcut-toggle {
+    right: 190px !important;
+    width: auto !important;
+    min-width: 82px !important;
+    padding: 0 12px !important;
+}
+
+.smart-workflow-toggle {
+    right: 280px !important;
+    width: auto !important;
+    min-width: 82px !important;
+    padding: 0 12px !important;
+}
+
+@media (max-width: 900px) {
+    .asset-toggle { right: 12px !important; min-width: 36px !important; padding: 0 8px !important; }
+    .smart-log-toggle { right: 54px !important; min-width: 36px !important; padding: 0 8px !important; }
+    .smart-shortcut-toggle { right: 96px !important; min-width: 36px !important; padding: 0 8px !important; }
+    .smart-workflow-toggle { right: 138px !important; min-width: 36px !important; padding: 0 8px !important; }
+}
+
+html.theme-dark .smart-back,
+html.theme-dark .smart-log-toggle,
+html.theme-dark .smart-shortcut-toggle,
+html.theme-dark .smart-workflow-toggle,
+html.theme-dark .asset-toggle,
+html.studio-theme-dark .smart-back,
+html.studio-theme-dark .smart-log-toggle,
+html.studio-theme-dark .smart-shortcut-toggle,
+html.studio-theme-dark .smart-workflow-toggle,
+html.studio-theme-dark .asset-toggle {
+    background: rgba(22, 23, 28, 0.9) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    color: #e4e4e7 !important;
+}
+
+html.theme-dark .smart-back:hover,
+html.theme-dark .smart-log-toggle:hover,
+html.theme-dark .smart-shortcut-toggle:hover,
+html.theme-dark .smart-workflow-toggle:hover,
+html.theme-dark .asset-toggle:hover {
+    background: rgba(30, 31, 38, 0.96) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    color: #ffffff !important;
+}
+
+.asset-panel,
+.workflow-transfer-panel,
+.smart-log-panel {
+    top: 56px !important;
+    border-radius: 16px !important;
+}
+
+/* Selected Node Top Floating Action Menu & Bottom Composer Card (LibTV Obsidian Match) */
+html.theme-dark .smart-node-floating-menu,
+html.studio-theme-dark .smart-node-floating-menu {
+    background: rgba(21, 22, 27, 0.95) !important;
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.52) !important;
+}
+
+html.theme-dark .composer-card,
+html.studio-theme-dark .composer-card {
+    background: rgba(21, 22, 27, 0.97) !important;
+    border: 1px solid rgba(255, 255, 255, 0.085) !important;
+    border-radius: 18px !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 28px 64px rgba(0, 0, 0, 0.56) !important;
+}
+
+html.theme-dark .composer-card .prompt-input,
+html.studio-theme-dark .composer-card .prompt-input {
+    background: #131418 !important;
+    border: 1px solid rgba(255, 255, 255, 0.06) !important;
+    border-radius: 12px !important;
+    color: #f3f4f6 !important;
+}
+
+html.theme-dark .composer-card .prompt-input:focus,
+html.studio-theme-dark .composer-card .prompt-input:focus {
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    box-shadow: none !important;
+}
+
+html.theme-dark .composer-card .mention-image-token,
+html.studio-theme-dark .composer-card .mention-image-token {
+    background: rgba(255, 255, 255, 0.09) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 6px !important;
+    color: #f4f4f5 !important;
+}
+
+html.theme-dark .composer-card .run-btn,
+html.studio-theme-dark .composer-card .run-btn {
+    background: #f4f4f6 !important;
+    color: #0e0f12 !important;
+    border-radius: 999px !important;
+    font-weight: 700 !important;
+}
+
+html.theme-dark .composer-card .run-btn:hover,
+html.studio-theme-dark .composer-card .run-btn:hover {
+    background: #ffffff !important;
+}
+
+.composer-icon-btn.is-copied {
+    color: #34d399 !important;
+    border-color: rgba(52, 211, 153, 0.3) !important;
+    background: rgba(16, 185, 129, 0.12) !important;
+}
+
+/* --- 4. Project Workspace (`canvas-list.html` — LibTV Obsidian Board & Cards) --- */
+html.theme-dark .workspace,
+html.studio-theme-dark .workspace {
+    --page: #0e0f12;
+    --grid: rgba(255, 255, 255, 0.055);
+    --panel: rgba(18, 19, 23, 0.96);
+    --panel-solid: #131418;
+    --card: rgba(23, 24, 30, 0.98);
+    --card-solid: #17181e;
+    --soft: #1f2027;
+    --soft-2: #272830;
+    --line: rgba(255, 255, 255, 0.075);
+    --line-2: rgba(255, 255, 255, 0.16);
+    --text: #f3f4f6;
+    --muted: #a1a1aa;
+    --faint: #71717a;
+    --strong: #f4f4f6;
+    --strong-text: #0e0f12;
+    background: #0e0f12 !important;
+}
+
+html.theme-dark .ws-sidebar,
+html.studio-theme-dark .ws-sidebar {
+    background: #111216 !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.065) !important;
+}
+
+html.theme-dark .ws-topbar,
+html.studio-theme-dark .ws-topbar {
+    background: rgba(16, 17, 21, 0.88) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.065) !important;
+}
+
+html.theme-dark .ws-card,
+html.studio-theme-dark .ws-card {
+    background: #17181e !important;
+    border: 1px solid rgba(255, 255, 255, 0.075) !important;
+    border-radius: 14px !important;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34) !important;
+}
+
+html.theme-dark .ws-card:hover,
+html.studio-theme-dark .ws-card:hover {
+    border-color: rgba(255, 255, 255, 0.2) !important;
+    background: #1c1d24 !important;
+}
+
+html.theme-dark .ws-project-row.active,
+html.studio-theme-dark .ws-project-row.active {
+    background: rgba(255, 255, 255, 0.1) !important;
+}
+
+html.theme-dark .ws-project-row.active .ws-project-name,
+html.theme-dark .ws-project-row.active .ws-project-icon,
+html.theme-dark .ws-project-row.active .ws-project-count,
+html.studio-theme-dark .ws-project-row.active .ws-project-name,
+html.studio-theme-dark .ws-project-row.active .ws-project-icon,
+html.studio-theme-dark .ws-project-row.active .ws-project-count {
+    color: #ffffff !important;
+}
+
+html.theme-dark .ws-project-row.active .ws-project-count,
+html.studio-theme-dark .ws-project-row.active .ws-project-count {
+    background: rgba(255, 255, 255, 0.12) !important;
+}
+
+html.theme-dark .ws-primary-btn,
+html.studio-theme-dark .ws-primary-btn {
+    background: #f4f4f6 !important;
+    color: #0e0f12 !important;
+    border-radius: 9px !important;
+    font-weight: 700 !important;
+}
+
+/* --- 5. Studio Inner Pages Unified LibTV Polish (`gpt-chat`, `zimage`, `enhance`, `klein`, `angle`, `online`, `asset-manager`, `api-settings`, `comfyui-settings`) --- */
+html.theme-dark,
+html.studio-theme-dark,
+html.theme-dark body:not(.shell-body),
+html.studio-theme-dark body:not(.shell-body),
+body.theme-dark,
+body.studio-theme-dark {
+    background-color: #0e0f12 !important;
+    color: #f3f4f6 !important;
+}
+
+/* Generator & Tool Cards */
+html.studio-theme-dark body .console-card,
+html.studio-theme-dark body .work-panel,
+html.studio-theme-dark body .tool-panel,
+html.studio-theme-dark body .control-panel,
+html.studio-theme-dark body .engine-panel,
+html.studio-theme-dark body .result-frame,
+html.studio-theme-dark body .masonry-item,
+html.studio-theme-dark body .upload-item,
+html.studio-theme-dark body .nano-input,
+html.studio-theme-dark body .setting-row,
+html.studio-theme-dark body #compareContainer,
+html.studio-theme-dark body #compareContainerKlein {
+    background-color: #16171c !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 16px !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 14px 36px rgba(0, 0, 0, 0.36) !important;
+    color: #f3f4f6 !important;
+}
+
+html.studio-theme-dark body .upload-item {
+    border-style: dashed !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    background-color: #131419 !important;
+}
+
+html.studio-theme-dark body .upload-item:hover,
+html.studio-theme-dark body .upload-item.drag-over,
+html.studio-theme-dark body .masonry-item:hover,
+html.studio-theme-dark body .console-card:focus-within {
+    border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+/* Segmented Mode Switchers, Pills & Inputs Across Generator Pages */
+html.studio-theme-dark body .mode-switcher,
+html.studio-theme-dark body .engine-switch,
+html.studio-theme-dark body .provider-switch,
+html.studio-theme-dark body .model-pill,
+html.studio-theme-dark body .ratio-grid,
+html.studio-theme-dark body .resolution-toggle,
+html.studio-theme-dark body .select-shell,
+html.studio-theme-dark body .mode-switch,
+html.studio-theme-dark body .mini-ratio {
+    background-color: #121317 !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    box-shadow: none !important;
+}
+
+html.studio-theme-dark body .size-select,
+html.studio-theme-dark body .size-custom,
+html.studio-theme-dark body .size-fit-btn,
+html.studio-theme-dark body .pfield-input,
+html.studio-theme-dark body .pfield-textarea,
+html.studio-theme-dark body .pfield-select {
+    background-color: #121317 !important;
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    border-radius: 10px !important;
+    color: #f3f4f6 !important;
+}
+
+html.studio-theme-dark body .size-select:focus,
+html.studio-theme-dark body .size-custom:focus,
+html.studio-theme-dark body .pfield-input:focus,
+html.studio-theme-dark body .pfield-textarea:focus,
+html.studio-theme-dark body .pfield-select:focus {
+    border-color: rgba(255, 255, 255, 0.24) !important;
+}
+
+html.studio-theme-dark body .mode-badge,
+html.studio-theme-dark body .builtin-badge {
+    background: rgba(255, 255, 255, 0.08) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    color: #d4d4d8 !important;
+}
+
+/* Primary Action Buttons Across All Tool Pages */
+html.studio-theme-dark body .glass-btn,
+html.studio-theme-dark body .btn-render,
+html.studio-theme-dark body .gen-btn,
+html.studio-theme-dark body .primary-btn,
+html.studio-theme-dark body .action-btn.save-btn {
+    background: #f4f4f6 !important;
+    border-color: #f4f4f6 !important;
+    color: #0e0f12 !important;
+    border-radius: 12px !important;
+    font-weight: 700 !important;
+}
+
+html.studio-theme-dark body .glass-btn:hover,
+html.studio-theme-dark body .btn-render:hover,
+html.studio-theme-dark body .gen-btn:hover,
+html.studio-theme-dark body .primary-btn:hover,
+html.studio-theme-dark body .action-btn.save-btn:hover {
+    background: #ffffff !important;
+    border-color: #ffffff !important;
+    color: #09090b !important;
+}
+
+/* GPT Chat Inner Page Unified with Smart Canvas Agent */
+html.studio-theme-dark body .chat-shell,
+html.studio-theme-dark body .messages {
+    background: #0e0f12 !important;
+}
+
+html.studio-theme-dark body .topbar {
+    background: rgba(14, 15, 18, 0.9) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07) !important;
+}
+
+html.studio-theme-dark body .composer-wrap {
+    background: linear-gradient(to top, #0e0f12 82%, rgba(14, 15, 18, 0)) !important;
+}
+
+html.studio-theme-dark body .chat-shell .composer {
+    background: #16171c !important;
+    border: 1px solid rgba(255, 255, 255, 0.085) !important;
+    border-radius: 18px !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 20px 48px rgba(0, 0, 0, 0.45) !important;
+}
+
+html.studio-theme-dark body .chat-shell .composer-body {
+    background: #121317 !important;
+    border: 1px solid rgba(255, 255, 255, 0.07) !important;
+    border-radius: 13px !important;
+}
+
+html.studio-theme-dark body .bubble.user {
+    background: #232429 !important;
+    border: 1px solid rgba(255, 255, 255, 0.07) !important;
+    color: #f4f4f5 !important;
+    border-radius: 14px !important;
+}
+
+html.studio-theme-dark body .bubble.assistant {
+    background: #16171c !important;
+    border: 1px solid rgba(255, 255, 255, 0.075) !important;
+    color: #e4e4e7 !important;
+    border-radius: 14px !important;
+}
+
+/* Asset Manager, API Settings & ComfyUI Settings Panels */
+html.theme-dark .asset-page,
+html.studio-theme-dark .asset-page {
+    background: #0e0f12 !important;
+}
+
+html.theme-dark .asset-page .asset-panel,
+html.studio-theme-dark .asset-page .asset-panel,
+html.theme-dark .asset-tabs,
+html.studio-theme-dark .asset-tabs {
+    background: #16171c !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34) !important;
+}
+
+html.theme-dark .asset-page .panel-head,
+html.studio-theme-dark .asset-page .panel-head {
+    border-bottom-color: rgba(255, 255, 255, 0.07) !important;
+}
+
+html.studio-theme-dark .page .sidebar,
+html.studio-theme-dark .page .side-card,
+html.studio-theme-dark .page .content-head,
+html.studio-theme-dark .page .graph-card,
+html.studio-theme-dark .page .editor-card,
+html.studio-theme-dark .page .section-card {
+    background: #16171c !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    border-radius: 16px !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 12px 32px rgba(0, 0, 0, 0.32) !important;
+}
+
+/* Lightbox Overlay Across All Pages */
+html.theme-dark #lightbox,
+html.studio-theme-dark #lightbox,
+html.theme-dark .gallery-lightbox,
+html.studio-theme-dark .gallery-lightbox {
+    background: rgba(10, 11, 14, 0.94) !important;
+}
+
+/* --- 6. API Settings Quick Connect Wizard & Enhanced Model Picker (LibTV Studio Style) --- */
+.dx-os-banner {
+    display: none !important;
+}
+
+.qc-card {
+    margin: 0 0 24px;
+    border-radius: 18px;
+    border: 1px solid var(--lib-border);
+    background: var(--lib-bg-card);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+    overflow: hidden;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+html.theme-dark .qc-card,
+html.studio-theme-dark .qc-card,
+body.studio-theme-dark .qc-card {
+    background: #16171c !important;
+    border-color: rgba(255, 255, 255, 0.085) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 16px 38px rgba(0, 0, 0, 0.34) !important;
+}
+
+.qc-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--lib-border);
+    flex-wrap: wrap;
+}
+
+.qc-card.is-collapsed .qc-head {
+    border-bottom-color: transparent;
+}
+
+.qc-head-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.qc-badge {
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    background: var(--lib-cta-bg);
+    color: var(--lib-cta-fg);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    flex: 0 0 auto;
+}
+
+.qc-head-sub {
+    color: var(--lib-text-sub);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.45;
+}
+
+.qc-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--lib-bg-soft);
+    border: 1px solid var(--lib-border);
+}
+
+html.theme-dark .qc-tabs,
+html.studio-theme-dark .qc-tabs,
+body.studio-theme-dark .qc-tabs {
+    background: #121317 !important;
+    border-color: rgba(255, 255, 255, 0.075) !important;
+}
+
+.qc-tab {
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-weight: 750;
+    color: var(--lib-text-sub);
+    transition: all 0.14s ease;
+    white-space: nowrap;
+}
+
+.qc-tab:hover {
+    color: var(--lib-text);
+}
+
+.qc-tab.active {
+    background: var(--lib-bg-card);
+    color: var(--lib-text);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+html.theme-dark .qc-tab.active,
+html.studio-theme-dark .qc-tab.active,
+body.studio-theme-dark .qc-tab.active {
+    background: #22232b !important;
+    color: #ffffff !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07) !important;
+}
+
+.qc-collapse-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--lib-text-sub);
+    transition: background 0.14s ease, color 0.14s ease;
+}
+
+.qc-collapse-btn:hover {
+    background: var(--lib-bg-hover);
+    color: var(--lib-text);
+}
+
+.qc-collapse-btn svg {
+    transition: transform 0.18s ease;
+}
+
+.qc-card.is-collapsed .qc-collapse-btn svg {
+    transform: rotate(180deg);
+}
+
+.qc-pane {
+    padding: 16px 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.qc-pane[hidden],
+.qc-card.is-collapsed .qc-pane {
+    display: none !important;
+}
+
+.qc-paste-box textarea {
+    width: 100%;
+    min-height: 54px;
+    padding: 10px 13px;
+    border-radius: 12px;
+    border: 1px dashed var(--lib-border-strong);
+    background: var(--lib-bg-soft);
+    color: var(--lib-text);
+    font-size: 12.5px;
+    line-height: 1.5;
+    font-weight: 550;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+html.theme-dark .qc-paste-box textarea,
+html.studio-theme-dark .qc-paste-box textarea,
+body.studio-theme-dark .qc-paste-box textarea {
+    background: #121317 !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    color: #f3f4f6 !important;
+}
+
+.qc-paste-box textarea:focus {
+    border-style: solid;
+    border-color: var(--lib-text);
+}
+
+.qc-relay-grid {
+    display: grid;
+    grid-template-columns: minmax(200px, 1.35fr) minmax(180px, 1.15fr) minmax(130px, 0.8fr) auto;
+    gap: 10px;
+    align-items: end;
+}
+
+@media (max-width: 960px) {
+    .qc-relay-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+    .qc-relay-act {
+        grid-column: 1 / -1;
+    }
+    .qc-relay-act .qc-primary-btn {
+        width: 100%;
+    }
+}
+
+@media (max-width: 600px) {
+    .qc-relay-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.qc-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+}
+
+.qc-field > span {
+    font-size: 11px;
+    font-weight: 750;
+    color: var(--lib-text-sub);
+}
+
+.qc-field > input,
+.qc-official-input-row > input {
+    width: 100%;
+    height: 38px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid var(--lib-border-strong);
+    background: #ffffff;
+    color: var(--lib-text);
+    font-size: 12.5px;
+    font-weight: 650;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+html.theme-dark .qc-field > input,
+html.studio-theme-dark .qc-field > input,
+body.studio-theme-dark .qc-field > input,
+html.theme-dark .qc-official-input-row > input,
+html.studio-theme-dark .qc-official-input-row > input,
+body.studio-theme-dark .qc-official-input-row > input {
+    background: #121317 !important;
+    border-color: rgba(255, 255, 255, 0.11) !important;
+    color: #f3f4f6 !important;
+}
+
+.qc-field > input:focus,
+.qc-official-input-row > input:focus {
+    border-color: var(--lib-text) !important;
+}
+
+.qc-primary-btn {
+    height: 38px;
+    padding: 0 16px;
+    border-radius: 10px;
+    background: var(--lib-cta-bg);
+    color: var(--lib-cta-fg);
+    border: 1px solid var(--lib-cta-bg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 800;
+    white-space: nowrap;
+    transition: transform 0.14s ease, opacity 0.14s ease, background 0.14s ease;
+}
+
+.qc-primary-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    opacity: 0.94;
+}
+
+.qc-primary-btn:disabled {
+    opacity: 0.55;
+    cursor: wait;
+}
+
+.qc-status-line {
+    padding: 9px 12px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.5;
+    border: 1px solid var(--lib-border);
+    background: var(--lib-bg-soft);
+    color: var(--lib-text-sub);
+}
+
+.qc-status-line[hidden] {
+    display: none !important;
+}
+
+.qc-status-line[data-tone="ok"] {
+    border-color: rgba(16, 185, 129, 0.35);
+    background: rgba(16, 185, 129, 0.09);
+    color: #059669;
+}
+
+html.theme-dark .qc-status-line[data-tone="ok"],
+html.studio-theme-dark .qc-status-line[data-tone="ok"],
+body.studio-theme-dark .qc-status-line[data-tone="ok"] {
+    border-color: rgba(52, 211, 153, 0.32);
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+}
+
+.qc-status-line[data-tone="warn"] {
+    border-color: rgba(245, 158, 11, 0.38);
+    background: rgba(245, 158, 11, 0.1);
+    color: #b45309;
+}
+
+html.theme-dark .qc-status-line[data-tone="warn"],
+html.studio-theme-dark .qc-status-line[data-tone="warn"],
+body.studio-theme-dark .qc-status-line[data-tone="warn"] {
+    border-color: rgba(251, 191, 36, 0.32);
+    background: rgba(245, 158, 11, 0.12);
+    color: #fbbf24;
+}
+
+.qc-inline-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    margin-left: 2px;
+    border-radius: 6px;
+    border: 1px solid currentColor;
+    background: rgba(255, 255, 255, 0.08);
+    color: inherit;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: opacity 0.14s ease;
+}
+
+.qc-inline-link:hover {
+    opacity: 0.85;
+}
+
+/* Official API Presets Grid */
+.qc-official-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+@media (max-width: 960px) {
+    .qc-official-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 560px) {
+    .qc-official-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.qc-official-card {
+    text-align: left;
+    padding: 12px 13px;
+    border-radius: 12px;
+    border: 1px solid var(--lib-border);
+    background: var(--lib-bg-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+html.theme-dark .qc-official-card,
+html.studio-theme-dark .qc-official-card,
+body.studio-theme-dark .qc-official-card {
+    background: #121317 !important;
+    border-color: rgba(255, 255, 255, 0.075) !important;
+}
+
+.qc-official-card:hover {
+    border-color: var(--lib-border-strong) !important;
+    transform: translateY(-1px);
+}
+
+.qc-official-card.active {
+    border-color: var(--lib-text) !important;
+    background: var(--lib-bg-card) !important;
+    box-shadow: inset 0 0 0 1px var(--lib-text);
+}
+
+html.theme-dark .qc-official-card.active,
+html.studio-theme-dark .qc-official-card.active,
+body.studio-theme-dark .qc-official-card.active {
+    background: #1d1e25 !important;
+    border-color: rgba(255, 255, 255, 0.45) !important;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16) !important;
+}
+
+.qc-official-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.qc-official-badge {
+    font-size: 9.5px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: rgba(128, 128, 140, 0.14);
+    color: var(--lib-text-sub);
+}
+
+.qc-official-configured {
+    font-size: 10px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(16, 185, 129, 0.14);
+    color: #059669;
+}
+
+html.theme-dark .qc-official-configured,
+html.studio-theme-dark .qc-official-configured,
+body.studio-theme-dark .qc-official-configured {
+    color: #34d399;
+}
+
+.qc-official-name {
+    font-size: 13px;
+    font-weight: 850;
+    color: var(--lib-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.qc-official-desc {
+    font-size: 11px;
+    line-height: 1.42;
+    color: var(--lib-text-sub);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.qc-official-keybar {
+    padding: 13px 15px;
+    border-radius: 12px;
+    border: 1px solid var(--lib-border-strong);
+    background: var(--lib-bg-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+html.theme-dark .qc-official-keybar,
+html.studio-theme-dark .qc-official-keybar,
+body.studio-theme-dark .qc-official-keybar {
+    background: #121317 !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+.qc-official-keybar[hidden] {
+    display: none !important;
+}
+
+.qc-official-selected-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--lib-text);
+}
+
+.qc-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--lib-text-sub);
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: rgba(128, 128, 140, 0.12);
+}
+
+.qc-key-link {
+    margin-left: auto;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 1px solid var(--lib-border-strong);
+    background: var(--lib-bg-card);
+    color: var(--lib-text);
+    font-size: 11.5px;
+    font-weight: 750;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+html.theme-dark .qc-key-link,
+html.studio-theme-dark .qc-key-link,
+body.studio-theme-dark .qc-key-link {
+    background: #1d1e25 !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    color: #f4f4f6 !important;
+}
+
+.qc-key-link:hover {
+    border-color: var(--lib-text) !important;
+}
+
+.qc-official-input-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+}
+
+@media (max-width: 640px) {
+    .qc-official-input-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Enhanced Model Picker Quick Actions & Per-Row Category Switcher */
+.picker-quick-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    width: 100%;
+    padding-top: 2px;
+}
+
+.qc-mini-btn {
+    height: 27px;
+    padding: 0 10px;
+    border-radius: 7px;
+    border: 1px solid var(--lib-border-strong);
+    background: var(--lib-bg-soft);
+    color: var(--lib-text-sub);
+    font-size: 11px;
+    font-weight: 750;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.14s ease;
+}
+
+html.theme-dark .qc-mini-btn,
+html.studio-theme-dark .qc-mini-btn,
+body.studio-theme-dark .qc-mini-btn {
+    background: #121317;
+    border-color: rgba(255, 255, 255, 0.11);
+    color: #a1a1aa;
+}
+
+.qc-mini-btn:hover {
+    color: var(--lib-text);
+    border-color: var(--lib-text);
+}
+
+.qc-mini-btn.accent {
+    background: var(--lib-cta-bg) !important;
+    color: var(--lib-cta-fg) !important;
+    border-color: var(--lib-cta-bg) !important;
+}
+
+.picker-row-cats {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
+    background: var(--lib-bg-soft);
+    border: 1px solid var(--lib-border);
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+html.theme-dark .picker-row-cats,
+html.studio-theme-dark .picker-row-cats,
+body.studio-theme-dark .picker-row-cats {
+    background: #121317;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+.picker-row-cats button {
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    font-weight: 800;
+    color: var(--lib-text-muted);
+    transition: all 0.12s ease;
+}
+
+.picker-row-cats button:hover {
+    color: var(--lib-text);
+}
+
+.picker-row-cats button.active {
+    background: var(--lib-cta-bg);
+    color: var(--lib-cta-fg);
+}
+
+

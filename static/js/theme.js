@@ -250,10 +250,20 @@
         set: setScaleMode
     };
 
+    function ensureUnifiedStudioStyle(){
+        if(document.querySelector('link[href*="/static/css/studio-unified.css"]')) return;
+        const link = document.createElement('link');
+        link.id = 'studio-unified-css';
+        link.rel = 'stylesheet';
+        link.href = '/static/css/studio-unified.css?v=2026.11.21.12';
+        (document.head || document.documentElement).appendChild(link);
+    }
+
     applyTheme(currentTheme());
     applyScale(currentScaleMode());
 
     document.addEventListener('DOMContentLoaded', () => {
+        ensureUnifiedStudioStyle();
         applyTheme(currentTheme());
         applyScale(currentScaleMode());
     });

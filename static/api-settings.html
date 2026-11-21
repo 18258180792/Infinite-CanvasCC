@@ -16,12 +16,13 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/theme.js?v=2026.11.17.1.1794893788"></script>
-    <script src="/static/js/i18n.js?v=2026.11.17.1.1794894627"></script>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.17.1.1794893788">
-    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.11.17.1.1794893788">
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.21.1.1794902612"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.11.21.1.1794902611"></script>
+    <script src="/static/js/theme.js?v=2026.11.21.1.1795234217"></script>
+    <script src="/static/js/i18n.js?v=2026.11.21.1.1794902556"></script>
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.21.1.1795232862">
+    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.11.21.1.1795234108">
+    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.21.1.1795234213">
 </head>
 <body>
     <div class="page">
@@ -34,20 +35,66 @@
                 <div id="status" class="status"></div>
             </header>
 
-            <a class="dx-os-banner" href="https://dx-os.com" target="_blank" rel="noopener noreferrer" aria-label="前往 DX-OS 官网下载新版本">
-                <span class="dx-os-banner-logo" aria-hidden="true">
-                    <img src="/static/images/dx-os-logo.svg" alt="">
-                </span>
-                <span class="dx-os-banner-copy">
-                    <span class="dx-os-banner-kicker">DX-OS · 全新免费 AI 系统</span>
-                    <span class="dx-os-banner-title">此项目已停更，新版本请前往 DX-OS 官网下载</span>
-                    <span class="dx-os-banner-features">内置 Skill / Agent / MCP · 全新多账号协同画布 · 支持自定义开发全新应用 · 众多免费应用可下载</span>
-                </span>
-                <span class="dx-os-banner-action">
-                    <span>访问 dx-os.com</span>
-                    <i data-lucide="arrow-up-right" class="w-4 h-4"></i>
-                </span>
-            </a>
+            <!-- 极速接入向导：一键接入任意中转站 & 正版官方 API 预设 -->
+            <section id="quickConnectCard" class="qc-card">
+                <div class="qc-head">
+                    <div class="qc-head-left">
+                        <span class="qc-badge"><i data-lucide="zap" class="w-3.5 h-3.5"></i><span>极速接入</span></span>
+                        <span class="qc-head-sub">粘贴一段配置即可连好任意中转站，或点选正版官方 API 填入 Key 一键启用</span>
+                    </div>
+                    <div class="qc-tabs">
+                        <button type="button" class="qc-tab active" data-qc-tab="relay" onclick="switchQuickConnectTab('relay')">中转站智能接入</button>
+                        <button type="button" class="qc-tab" data-qc-tab="official" onclick="switchQuickConnectTab('official')">正版官方 API 预设</button>
+                        <button type="button" class="qc-collapse-btn" onclick="toggleQuickConnectCollapse()" title="收起/展开极速接入面板"><i data-lucide="chevron-up" class="w-4 h-4"></i></button>
+                    </div>
+                </div>
+
+                <!-- Tab 1: 中转站智能一键接入 -->
+                <div id="qcPaneRelay" class="qc-pane">
+                    <div class="qc-paste-box">
+                        <textarea id="qcSmartPasteInput" rows="2" placeholder="💡 懒人粘贴区：直接把中转站复制来的整段文字粘进来（例如含 https://... 地址和 sk-... 密钥的文本），下方会自动拆分填好！" oninput="handleSmartRelayPaste(this.value)"></textarea>
+                    </div>
+                    <div class="qc-relay-grid">
+                        <label class="qc-field">
+                            <span>接口地址 (Base URL，自动补全 /v1)</span>
+                            <input id="qcRelayUrlInput" type="text" placeholder="https://api.xxx.com/v1" oninput="handleQuickRelayUrlChange(this.value)">
+                        </label>
+                        <label class="qc-field">
+                            <span>API Key</span>
+                            <input id="qcRelayKeyInput" type="password" placeholder="sk-...">
+                        </label>
+                        <label class="qc-field qc-field-name">
+                            <span>显示名称（自动识别）</span>
+                            <input id="qcRelayNameInput" type="text" placeholder="自动按域名命名">
+                        </label>
+                        <div class="qc-relay-act">
+                            <button id="qcRelayRunBtn" type="button" class="qc-primary-btn" onclick="quickConnectRelayRun()">
+                                <i data-lucide="sparkles" class="w-4 h-4"></i><span>一键测协议 + 拉模型 + 保存</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="qcRelayStatus" class="qc-status-line" hidden></div>
+                </div>
+
+                <!-- Tab 2: 正版官方 API 一键预设 -->
+                <div id="qcPaneOfficial" class="qc-pane" hidden>
+                    <div id="qcOfficialGrid" class="qc-official-grid"></div>
+                    <div id="qcOfficialKeyBar" class="qc-official-keybar" hidden>
+                        <div class="qc-official-selected-info">
+                            <strong id="qcOfficialSelectedName">OpenAI 官方</strong>
+                            <span id="qcOfficialSelectedUrl" class="qc-mono">https://api.openai.com/v1</span>
+                            <a id="qcOfficialKeyLink" href="#" target="_blank" rel="noopener noreferrer" class="qc-key-link">前往官网获取 Key ↗</a>
+                        </div>
+                        <div class="qc-official-input-row">
+                            <input id="qcOfficialKeyInput" type="password" placeholder="粘贴该平台正版 API Key…">
+                            <button id="qcOfficialSaveBtn" type="button" class="qc-primary-btn" onclick="quickConnectOfficialRun()">
+                                <i data-lucide="check" class="w-4 h-4"></i><span>一键启用并拉取保存</span>
+                            </button>
+                        </div>
+                        <div id="qcOfficialStatus" class="qc-status-line" hidden></div>
+                    </div>
+                </div>
+            </section>
 
             <div class="layout">
                 <aside class="sidebar">
@@ -280,6 +327,9 @@
                             </div>
                             <!-- 验证操作行 -->
                             <div class="verify-action-row">
+                                <button id="oneClickSetupBtn" class="action-btn primary-btn" type="button" onclick="oneClickVerifyFetchSave()" title="自动探测协议、拉取并精选模型、一步保存">
+                                    <i data-lucide="zap" class="w-3.5 h-3.5"></i><span>一键检测并拉取保存</span>
+                                </button>
                                 <button id="testUrlBtn" class="action-btn" type="button" onclick="testConnection()">
                                     <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i><span data-i18n="api.testUrl">验证地址</span>
                                 </button>
@@ -366,7 +416,10 @@
                                         <span class="ms-line"><span data-i18n="api.msModelExample">模型名称示意：</span><span class="inline-code">Tongyi-MAI/Z-Image-Turbo</span></span>
                                     </div>
                                 </div>
-                                <button class="ghost-btn" type="button" onclick="addModel('image')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                                <div style="display:flex;gap:6px;align-items:center">
+                                    <button class="ghost-btn" type="button" onclick="batchPasteModels('image')" title="粘贴多个以逗号或换行分隔的模型 ID"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i><span>批量粘贴</span></button>
+                                    <button class="ghost-btn" type="button" onclick="addModel('image')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                                </div>
                             </div>
                             <div id="imageModelList" class="model-list"></div>
                         </section>
@@ -377,7 +430,10 @@
                                     <div class="block-title" data-i18n="api.chatModels">聊天模型</div>
                                     <div class="block-desc" data-i18n="api.chatHint">GPT 对话和 LLM 节点使用</div>
                                 </div>
-                                <button class="ghost-btn" type="button" onclick="addModel('chat')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                                <div style="display:flex;gap:6px;align-items:center">
+                                    <button class="ghost-btn" type="button" onclick="batchPasteModels('chat')" title="粘贴多个以逗号或换行分隔的模型 ID"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i><span>批量粘贴</span></button>
+                                    <button class="ghost-btn" type="button" onclick="addModel('chat')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                                </div>
                         </div>
                         <div id="chatModelList" class="model-list"></div>
                     </section>
@@ -388,7 +444,10 @@
                                     <div class="block-title" data-i18n="api.videoModels">视频模型</div>
                                     <div class="block-desc" data-i18n="api.videoHint">无限画布视频生成节点使用</div>
                                 </div>
-                                <button class="ghost-btn" type="button" onclick="addModel('video')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                                <div style="display:flex;gap:6px;align-items:center">
+                                    <button class="ghost-btn" type="button" onclick="batchPasteModels('video')" title="粘贴多个以逗号或换行分隔的模型 ID"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i><span>批量粘贴</span></button>
+                                    <button class="ghost-btn" type="button" onclick="addModel('video')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                                </div>
                             </div>
                             <div id="videoModelList" class="model-list"></div>
                         </section>
@@ -454,6 +513,11 @@
                     <button class="picker-cat-tab" data-cat="chat" onclick="selectPickerCat('chat')">LLM <span class="cat-count">0</span></button>
                     <button class="picker-cat-tab" data-cat="video" onclick="selectPickerCat('video')">视频 <span class="cat-count">0</span></button>
                 </div>
+                <div class="picker-quick-actions">
+                    <button type="button" class="qc-mini-btn accent" onclick="smartCuratePickerModels()" title="自动筛选常用高质量生图、对话与视频模型">✨ 智能勾选主流</button>
+                    <button type="button" class="qc-mini-btn" onclick="bulkToggleVisiblePickerModels(true)">全选当前列表</button>
+                    <button type="button" class="qc-mini-btn" onclick="bulkToggleVisiblePickerModels(false)">清空当前列表</button>
+                </div>
             </div>
             <div id="pickerList" class="picker-body"></div>
             <div id="pickerSummary" class="picker-summary">
@@ -465,7 +529,7 @@
             </div>
             <div class="picker-foot">
                 <button class="action-btn" type="button" onclick="closeModelPicker()">取消</button>
-                <button class="action-btn save-btn" type="button" onclick="applyModelPicker()">应用到模型列表</button>
+                <button class="action-btn save-btn" type="button" onclick="applyModelPicker()">应用并立即保存</button>
             </div>
         </div>
     </div>
@@ -591,6 +655,6 @@
         </div>
     </div>
 
-    <script src="/static/js/api-settings.js?v=2026.11.17.1.1794893788"></script>
+    <script src="/static/js/api-settings.js?v=2026.11.21.1.1795233775"></script>
 </body>
 </html>

@@ -32,9 +32,13 @@ import shlex
 import functools
 import html
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Optional, Tuple
-from threading import Lock
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from typing import List, Dict, Any, Optional, Tuple, Literal
+from threading import Lock, Thread
 import httpx
+from requests.adapters import HTTPAdapter
 from PIL import Image, ImageOps
 from io import BytesIO
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Header, Request
@@ -92,6 +96,8 @@ async def request_logging_middleware(request: Request, call_next):
         elapsed_ms = (time.perf_counter() - started) * 1000
         LOG.info("request method=%s path=%s status=%s duration_ms=%.1f", request.method, request.url.path, response.status_code, elapsed_ms)
         response.headers["X-Request-ID"] = request_id
+        if request.url.path.startswith("/static/") and request.url.path.lower().endswith((".html", ".js", ".css")):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
     finally:
         _request_id.reset(token)
@@ -173,6 +179,18 @@ class ConnectionManager:
                 print(f"Broadcast asset library error: {e}")
                 self.active_connections.remove(connection)
 
+    async def broadcast_canvas_task_updated(self, task_payload: dict):
+        data = json.dumps({
+            "type": "canvas_task_updated",
+            **task_payload,
+        }, ensure_ascii=False)
+        for connection in self.active_connections[:]:
+            try:
+                await connection.send_text(data)
+            except Exception as e:
+                print(f"Broadcast canvas task error: {e}")
+                self.active_connections.remove(connection)
+
     async def send_personal_message(self, message: dict, client_id: str):
         ws = self.user_connections.get(client_id)
         if ws:
@@ -183,7 +201,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.09.1"
+APP_VERSION = "2026.11.21.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -210,6 +228,20 @@ async def startup_event():
         await asyncio.to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
+    # 无损瘦身膨胀的 history.json（剥离内嵌的巨型 Base64 字符串并预热内存缓存）
+    try:
+        await asyncio.to_thread(slim_existing_history_file)
+    except Exception as exc:
+        print(f"历史记录瘦身整理失败: {exc}")
+    # 把画布中已下载到本地缓存的临时远程图片链接落盘为永久本地资源，防止过期失效或拖慢对话中转
+    try:
+        await asyncio.to_thread(migrate_cached_remote_canvas_urls)
+    except Exception as exc:
+        print(f"画布远程缓存本地化整理失败: {exc}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_shared_http_clients()
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -674,24 +706,138 @@ SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant.")
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
 AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "1800"))
 CANVAS_LLM_TIMEOUT = float(os.getenv("CANVAS_LLM_TIMEOUT", "300"))
-IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "2"))
+IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "1.2"))
 IMAGE_TASK_TIMEOUT = float(os.getenv("IMAGE_TASK_TIMEOUT", str(AI_REQUEST_TIMEOUT)))
 COMFYUI_HISTORY_TIMEOUT = int(float(os.getenv("COMFYUI_HISTORY_TIMEOUT", "1800")))
 # 下载 ComfyUI 产物的 socket 超时（秒，作用于连接和每次 read）。没有它时一次网络卡顿会让 urlopen 永久挂起，
 # 导致 generate() 不返回、画布卡片一直转圈拿不到结果。给得足够大以容纳大视频/大图的正常下载。
 COMFYUI_DOWNLOAD_TIMEOUT = float(os.getenv("COMFYUI_DOWNLOAD_TIMEOUT", "120"))
 APIMART_IMAGE_TASK_TIMEOUT = float(os.getenv("APIMART_IMAGE_TASK_TIMEOUT", "1800"))
-APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "5"))
-APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "10"))
+APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "2.0"))
+APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "2.5"))
 TUDOU_ASYNC_IMAGE_TASK_TIMEOUT = float(os.getenv("TUDOU_ASYNC_IMAGE_TASK_TIMEOUT", "1800"))
-TUDOU_ASYNC_IMAGE_POLL_INTERVAL = float(os.getenv("TUDOU_ASYNC_IMAGE_POLL_INTERVAL", "4"))
-TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY", "12"))
+TUDOU_ASYNC_IMAGE_POLL_INTERVAL = float(os.getenv("TUDOU_ASYNC_IMAGE_POLL_INTERVAL", "3.0"))
+TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY", "5.0"))
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
 LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
 CHAT_ATTACHMENT_MAX = int(os.getenv("CHAT_ATTACHMENT_MAX", "20"))
 ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
+
+# --- 全局 HTTP Keep-Alive 连接池与智能代理快通道 ---
+_ORIGINAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
+_ORIGINAL_REQUESTS_GET = requests.get
+_SHARED_ASYNC_CLIENTS: Dict[Tuple[int, bool, bool], httpx.AsyncClient] = {}
+_SHARED_REQUESTS_SESSIONS: Dict[bool, requests.Session] = {}
+_SHARED_HTTP_LOCK = Lock()
+
+
+def provider_trust_env(provider: Optional[dict] = None) -> bool:
+    """默认走系统代理更快通道（trust_env=True）；仅当平台配置显式指定 proxy_mode='direct' 时直连。"""
+    mode = str((provider or {}).get("proxy_mode") or os.getenv("API_PROXY_MODE", "auto")).strip().lower()
+    if mode in {"direct", "off", "false", "0", "none"}:
+        return False
+    return True
+
+
+class _TimeoutScopedAsyncClient:
+    """在不关闭共享连接池的前提下，为每次调用绑定独立的请求级 timeout。"""
+
+    def __init__(self, client: httpx.AsyncClient, timeout: Any):
+        self._client = client
+        self._timeout = timeout
+
+    def _with_timeout(self, kwargs: dict) -> dict:
+        if "timeout" not in kwargs and self._timeout is not None:
+            kwargs = dict(kwargs)
+            kwargs["timeout"] = self._timeout
+        return kwargs
+
+    async def request(self, method: str, url: str, **kwargs):
+        return await self._client.request(method, url, **self._with_timeout(kwargs))
+
+    async def get(self, url: str, **kwargs):
+        return await self._client.get(url, **self._with_timeout(kwargs))
+
+    async def post(self, url: str, **kwargs):
+        return await self._client.post(url, **self._with_timeout(kwargs))
+
+    def stream(self, method: str, url: str, **kwargs):
+        return self._client.stream(method, url, **self._with_timeout(kwargs))
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+
+@asynccontextmanager
+async def shared_async_http_client(timeout: Any = None, trust_env: bool = True, follow_redirects: bool = False):
+    # 若单元测试对 main.httpx.AsyncClient 做了 monkeypatch，直接透传以保持 100% 测试兼容
+    if httpx.AsyncClient is not _ORIGINAL_HTTPX_ASYNC_CLIENT:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=trust_env, follow_redirects=follow_redirects) as client:
+            yield client
+        return
+    loop = asyncio.get_running_loop()
+    key = (id(loop), bool(trust_env), bool(follow_redirects))
+    client = _SHARED_ASYNC_CLIENTS.get(key)
+    if client is None or client.is_closed:
+        limits = httpx.Limits(max_connections=100, max_keepalive_connections=32, keepalive_expiry=60.0)
+        default_timeout = httpx.Timeout(connect=20.0, read=600.0, write=120.0, pool=20.0)
+        client = _ORIGINAL_HTTPX_ASYNC_CLIENT(
+            timeout=default_timeout,
+            limits=limits,
+            trust_env=bool(trust_env),
+            follow_redirects=bool(follow_redirects),
+        )
+        _SHARED_ASYNC_CLIENTS[key] = client
+    yield _TimeoutScopedAsyncClient(client, timeout)
+
+
+async def close_shared_http_clients():
+    clients = list(_SHARED_ASYNC_CLIENTS.values())
+    _SHARED_ASYNC_CLIENTS.clear()
+    for client in clients:
+        try:
+            if not client.is_closed:
+                await client.aclose()
+        except Exception:
+            pass
+    with _SHARED_HTTP_LOCK:
+        sessions = list(_SHARED_REQUESTS_SESSIONS.values())
+        _SHARED_REQUESTS_SESSIONS.clear()
+    for session in sessions:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def _get_shared_requests_session(trust_env: bool = True) -> requests.Session:
+    key = bool(trust_env)
+    with _SHARED_HTTP_LOCK:
+        session = _SHARED_REQUESTS_SESSIONS.get(key)
+        if session is None:
+            session = requests.Session()
+            session.trust_env = key
+            adapter = HTTPAdapter(pool_connections=24, pool_maxsize=48, max_retries=0)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            _SHARED_REQUESTS_SESSIONS[key] = session
+        return session
+
+
+def shared_requests_get(url: str, trust_env: bool = True, fallback_direct: bool = True, **kwargs):
+    """复用 requests Keep-Alive 连接池，默认走系统代理更快通道；若本地代理不可用自动无缝回退直连。"""
+    if requests.get is not _ORIGINAL_REQUESTS_GET:
+        return requests.get(url, **kwargs)
+    session = _get_shared_requests_session(trust_env=trust_env)
+    try:
+        return session.get(url, **kwargs)
+    except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError):
+        if trust_env and fallback_direct:
+            direct_session = _get_shared_requests_session(trust_env=False)
+            return direct_session.get(url, **kwargs)
+        raise
 
 FIELD_LABELS = {
     "prompt": "提示词",
@@ -1715,6 +1861,17 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
+
+@app.get("/static/{page_name}.html")
+async def serve_versioned_static_html(page_name: str):
+    safe_name = os.path.basename(f"{page_name}.html")
+    if safe_name != f"{page_name}.html" or safe_name.startswith("."):
+        raise HTTPException(status_code=404, detail="Not Found")
+    full_path = os.path.abspath(os.path.join(STATIC_DIR, safe_name))
+    static_root = os.path.abspath(STATIC_DIR)
+    if not (full_path.startswith(static_root + os.sep) and os.path.isfile(full_path)):
+        raise HTTPException(status_code=404, detail="Not Found")
+    return static_html_response(safe_name)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
@@ -2974,7 +3131,8 @@ class ChatRequest(BaseModel):
     model: str = ""
     image_model: str = ""
     image_provider: str = ""
-    mode: str = "chat"
+    mode: Literal["chat", "agent", "image"] = "chat"
+    reasoning_effort: Literal["", "low", "medium", "high"] = ""
     size: str = "1024x1024"
     aspect_ratio: str = ""
     resolution: str = ""
@@ -3129,12 +3287,40 @@ class ConversationCreateRequest(BaseModel):
     title: str = "新对话"
 
 class CanvasCreateRequest(BaseModel):
-    title: str = "未命名画布"
-    icon: str = "🧩"
-    kind: str = "classic"
+    title: str = "智能画布"
+    icon: str = "sparkles"
+    kind: str = "smart"
     project: Optional[str] = None
     board_x: Optional[float] = None
     board_y: Optional[float] = None
+
+class SmartCanvasAgentNodeInput(BaseModel):
+    id: str
+    index: int = 1
+    type: str = "smart-image"
+    title: str = ""
+    selected: bool = False
+    mentioned: bool = False
+    is_generated: bool = False
+    is_upstream_origin: bool = False
+    origin_for_id: str = ""
+    image_urls: List[str] = []
+    video_urls: List[str] = []
+    text: str = ""
+    width: int = 0
+    height: int = 0
+
+class SmartCanvasAgentRequest(BaseModel):
+    canvas_id: str = ""
+    message: str = Field(min_length=1, max_length=LLM_MESSAGE_MAX_LENGTH)
+    system_prompt: str = ""
+    skill_ids: List[str] = []
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    reasoning_effort: Literal["", "low", "medium", "high"] = ""
+    history: List[Dict[str, Any]] = []
+    canvas_nodes: List[SmartCanvasAgentNodeInput] = []
 
 class CanvasMetaUpdate(BaseModel):
     title: Optional[str] = None
@@ -3615,19 +3801,154 @@ def comfy_class_is_debug_text(class_type):
     ct = str(class_type or "").lower()
     return bool(ct) and any(h in ct for h in COMFY_DEBUG_TEXT_CLASS_HINTS)
 
-def save_to_history(record):
-    with HISTORY_LOCK:
-        history = []
-        if os.path.exists(HISTORY_FILE):
+_HISTORY_MEM_CACHE: Dict[str, Any] = {
+    "path": "",
+    "mtime_ns": -1,
+    "size": -1,
+    "items": None,
+}
+_HISTORY_FLUSH_PENDING = False
+
+
+def sanitize_history_value(value: Any, depth: int = 0) -> Any:
+    """剥离历史记录中内嵌的巨型 data:base64 字符串与冗余大字段，保留 URL/文件名/元数据。"""
+    if depth > 8:
+        return None
+    if isinstance(value, str):
+        if value.startswith("data:") and ";base64," in value and len(value) > 512:
+            mime = value[5:].split(";base64,", 1)[0] or "application/octet-stream"
+            approx_kb = max(1, (len(value) * 3) // 4096)
+            return f"[inline-base64-omitted:{mime}:{approx_kb}KB]"
+        if len(value) > 24000:
+            return value[:24000] + "...[truncated]"
+        return value
+    if isinstance(value, list):
+        return [sanitize_history_value(item, depth + 1) for item in value[:64]]
+    if isinstance(value, dict):
+        cleaned = {}
+        for k, v in value.items():
+            if k == "raw" and depth == 0:
+                # 历史面板不需要上游完整原始响应体，仅保留精简摘要避免膨胀
+                continue
+            cleaned[k] = sanitize_history_value(v, depth + 1)
+        return cleaned
+    return value
+
+
+def _read_history_unlocked(target_path: str) -> List[dict]:
+    if not os.path.exists(target_path):
+        _HISTORY_MEM_CACHE.update({"path": target_path, "mtime_ns": -1, "size": -1, "items": []})
+        return []
+    try:
+        st = os.stat(target_path)
+    except OSError:
+        return []
+    if (
+        _HISTORY_MEM_CACHE["items"] is not None
+        and _HISTORY_MEM_CACHE["path"] == target_path
+        and _HISTORY_MEM_CACHE["mtime_ns"] == st.st_mtime_ns
+        and _HISTORY_MEM_CACHE["size"] == st.st_size
+    ):
+        return _HISTORY_MEM_CACHE["items"]
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        items = loaded if isinstance(loaded, list) else []
+    except Exception:
+        items = []
+    _HISTORY_MEM_CACHE.update({
+        "path": target_path,
+        "mtime_ns": st.st_mtime_ns,
+        "size": st.st_size,
+        "items": items,
+    })
+    return items
+
+
+def _write_history_file_atomic(target_path: str, snapshot: List[dict]):
+    os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+    tmp_path = f"{target_path}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp_path, target_path)
+        st = os.stat(target_path)
+        _HISTORY_MEM_CACHE.update({
+            "path": target_path,
+            "mtime_ns": st.st_mtime_ns,
+            "size": st.st_size,
+        })
+    finally:
+        if os.path.exists(tmp_path):
             try:
-                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-            except: pass
-        if "timestamp" not in record:
-            record["timestamp"] = time.time()
-        history.insert(0, record)
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history[:5000], f, ensure_ascii=False, indent=4)
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _schedule_history_flush(target_path: str):
+    global _HISTORY_FLUSH_PENDING
+    if _HISTORY_FLUSH_PENDING:
+        return
+    _HISTORY_FLUSH_PENDING = True
+
+    def _worker():
+        global _HISTORY_FLUSH_PENDING
+        try:
+            with HISTORY_LOCK:
+                _HISTORY_FLUSH_PENDING = False
+                items = list(_HISTORY_MEM_CACHE.get("items") or [])
+                _write_history_file_atomic(target_path, items[:5000])
+        except Exception as exc:
+            _HISTORY_FLUSH_PENDING = False
+            LOG.warning("history_async_flush_failed error=%s", exc)
+
+    Thread(target=_worker, name="history-flush", daemon=True).start()
+
+
+def slim_existing_history_file():
+    """启动时自动备份并无损清理膨胀的 history.json（如 85MB -> <300KB），预热内存缓存。"""
+    with HISTORY_LOCK:
+        if not os.path.exists(HISTORY_FILE):
+            return 0, 0
+        try:
+            before_bytes = os.path.getsize(HISTORY_FILE)
+        except OSError:
+            return 0, 0
+        items = _read_history_unlocked(HISTORY_FILE)
+        slimmed = [sanitize_history_value(item) for item in items[:5000] if isinstance(item, dict)]
+        _HISTORY_MEM_CACHE["items"] = slimmed
+        if before_bytes > 2 * 1024 * 1024:
+            backup_dir = os.path.join(DATA_DIR, "migration_backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_path = os.path.join(backup_dir, "history_before_slim.json")
+            if not os.path.exists(backup_path):
+                try:
+                    shutil.copy2(HISTORY_FILE, backup_path)
+                except OSError:
+                    pass
+            _write_history_file_atomic(HISTORY_FILE, slimmed)
+            after_bytes = os.path.getsize(HISTORY_FILE)
+            LOG.info("history_file_slimmed entries=%d before_bytes=%d after_bytes=%d", len(slimmed), before_bytes, after_bytes)
+            return before_bytes, after_bytes
+        return before_bytes, before_bytes
+
+
+def save_to_history(record, sync_flush: bool = False):
+    clean_record = sanitize_history_value(dict(record) if isinstance(record, dict) else record)
+    if isinstance(clean_record, dict) and "timestamp" not in clean_record:
+        clean_record["timestamp"] = time.time()
+    target_path = HISTORY_FILE
+    with HISTORY_LOCK:
+        history = list(_read_history_unlocked(target_path))
+        history.insert(0, clean_record)
+        trimmed = history[:5000]
+        _HISTORY_MEM_CACHE["path"] = target_path
+        _HISTORY_MEM_CACHE["items"] = trimmed
+        if sync_flush:
+            _write_history_file_atomic(target_path, trimmed)
+            return
+    _schedule_history_flush(target_path)
 
 def get_comfy_history(comfy_address, prompt_id):
     try:
@@ -3785,7 +4106,7 @@ def list_projects():
         out.append(rec)
     return out
 
-def new_canvas(title="未命名画布", icon="layers", kind="classic", project=None, board_x=None, board_y=None):
+def new_canvas(title="智能画布", icon="sparkles", kind="smart", project=None, board_x=None, board_y=None):
     timestamp = now_ms()
     canvas_kind = normalize_canvas_kind(kind)
     canvas = {
@@ -4032,8 +4353,7 @@ def canvas_assets_index():
     items.sort(key=lambda item: int(item.get("canvas_updated_at") or item.get("created_at") or 0), reverse=True)
     categories = [
         {"id": "all", "name": "全部画布", "count": item_counts.get("all", 0), "canvas_count": canvas_counts.get("all", 0)},
-        {"id": "smart", "name": "智能画布", "count": item_counts.get("smart", 0), "canvas_count": canvas_counts.get("smart", 0)},
-        {"id": "classic", "name": "普通画布", "count": item_counts.get("classic", 0), "canvas_count": canvas_counts.get("classic", 0)},
+        {"id": "smart", "name": "智能画布", "count": item_counts.get("all", 0), "canvas_count": canvas_counts.get("all", 0)},
     ]
     return {"categories": categories, "canvases": canvases, "items": items}
 
@@ -4222,6 +4542,9 @@ def text_from_chat_response(data):
     return str(content)
 
 def text_delta_from_chat_chunk(data):
+    data = unwrap_apimart_response(data)
+    if not isinstance(data, dict):
+        return ""
     choices = data.get("choices") or []
     if not choices:
         return ""
@@ -4236,6 +4559,43 @@ def text_delta_from_chat_chunk(data):
                 parts.append(item.get("text") or item.get("content") or "")
         return "".join(parts)
     return str(content) if content else ""
+
+def chat_reasoning_options(payload, model):
+    effort = getattr(payload, "reasoning_effort", "")
+    name = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    supported = bool(re.match(r"^(?:gpt-[56](?:[.-]|$)|o[134](?:-|$))", name))
+    if not effort or not supported or any(part in name for part in ("image", "chat-latest", "realtime", "audio", "-pro", "o1-mini", "o1-preview")):
+        return {}
+    return {"reasoning_effort": effort}
+
+def reasoning_from_chat_response(data, streaming=False):
+    data = unwrap_apimart_response(data)
+    if not isinstance(data, dict):
+        return ""
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("delta" if streaming else "message") or {}
+    if not isinstance(message, dict):
+        return ""
+    value = message.get("reasoning_content") or message.get("reasoning") or ""
+    return value if isinstance(value, str) else ""
+
+def chat_response_error(data):
+    if not isinstance(data, dict):
+        return ""
+    error = data.get("error")
+    if error:
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("detail") or error)
+        return str(error)
+    code = data.get("code")
+    if code is not None and str(code) not in {"0", "200"} and not data.get("choices"):
+        return str(data.get("message") or data.get("msg") or f"上游接口错误：{code}")
+    unwrapped = unwrap_apimart_response(data)
+    if unwrapped is not data:
+        return chat_response_error(unwrapped)
+    return ""
 
 def sse_event(data):
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -7066,7 +7426,7 @@ def requests_get_with_transient_retries(url, attempts=3, retry_delay=0.35, **kwa
     host = urllib.parse.urlparse(str(url or "")).hostname or "unknown"
     for attempt in range(attempts):
         try:
-            response = requests.get(url, **kwargs)
+            response = shared_requests_get(url, **kwargs)
         except (requests.Timeout, requests.ConnectionError) as exc:
             if attempt + 1 >= attempts:
                 raise
@@ -7103,10 +7463,12 @@ async def wait_for_image_task(client, task_id, provider=None, response_validator
     is_apimart = is_apimart_provider(provider) and not is_soonstudio_provider(provider)
     is_tudou_async = is_tudou_async_image_mode(provider)
     timeout = TUDOU_ASYNC_IMAGE_TASK_TIMEOUT if is_tudou_async else APIMART_IMAGE_TASK_TIMEOUT if is_apimart else IMAGE_TASK_TIMEOUT
-    interval = TUDOU_ASYNC_IMAGE_POLL_INTERVAL if is_tudou_async else APIMART_IMAGE_POLL_INTERVAL if is_apimart else IMAGE_POLL_INTERVAL
+    base_interval = TUDOU_ASYNC_IMAGE_POLL_INTERVAL if is_tudou_async else APIMART_IMAGE_POLL_INTERVAL if is_apimart else IMAGE_POLL_INTERVAL
     initial_delay = TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY if is_tudou_async else APIMART_IMAGE_INITIAL_POLL_DELAY if is_apimart else 0
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     last_payload = {}
+    poll_count = 0
     while time.monotonic() < deadline:
         if initial_delay:
             await asyncio.sleep(min(initial_delay, max(0.0, deadline - time.monotonic())))
@@ -7114,6 +7476,7 @@ async def wait_for_image_task(client, task_id, provider=None, response_validator
             if time.monotonic() >= deadline:
                 break
         last_payload = await fetch_image_task_payload(client, task_id, provider, model=model)
+        poll_count += 1
         if response_validator:
             response_validator(last_payload)
         status = image_task_status(last_payload)
@@ -7127,7 +7490,10 @@ async def wait_for_image_task(client, task_id, provider=None, response_validator
             return last_payload
         if status in IMAGE_TASK_FAILED_STATUSES:
             raise HTTPException(status_code=502, detail=f"生图任务失败：{image_task_fail_reason(last_payload)}")
-        await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+        elapsed = time.monotonic() - started
+        # 自适应轮询：前 35 秒处于高频出图窗口，使用快速轮询减少尾延迟；长任务自动平稳放缓
+        step_interval = base_interval if elapsed < 35.0 else max(base_interval, 2.2)
+        await asyncio.sleep(min(step_interval, max(0.0, deadline - time.monotonic())))
     raw_text = json.dumps(last_payload, ensure_ascii=False)[:800] if last_payload else ""
     extra = f"，最后响应：{raw_text}" if raw_text else ""
     raise HTTPException(status_code=504, detail=f"生图任务超时（已等待 {int(timeout)} 秒），task_id={task_id}{extra}")
@@ -7579,7 +7945,7 @@ def cache_remote_inline_image(url: str, response, headers: dict, timeout=REMOTE_
             remaining = remaining_budget()
             if attempt:
                 retry_timeout = tuple(min(value, remaining) for value in timeout) if isinstance(timeout, tuple) else min(timeout, remaining)
-                current = (request_get or requests.get)(url, stream=True, timeout=retry_timeout, headers=headers)
+                current = (request_get or shared_requests_get)(url, stream=True, timeout=retry_timeout, headers=headers)
             remaining_budget()
             current.raise_for_status()
             content_type = (current.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
@@ -7642,31 +8008,53 @@ def cache_remote_inline_image(url: str, response, headers: dict, timeout=REMOTE_
         raise last_error
     return None
 
+
+_REMOTE_URL_LOCKS: OrderedDict = OrderedDict()
+_REMOTE_URL_LOCKS_GUARD = Lock()
+
+
+def _remote_url_download_lock(url: str) -> Lock:
+    """Singleflight 锁：同一个远程图片 URL 全局同一时刻只发起一次下载，消除后台缓存/缩略图/原图三重并发抢带宽踩踏。"""
+    key = str(url or "")
+    with _REMOTE_URL_LOCKS_GUARD:
+        lock = _REMOTE_URL_LOCKS.get(key)
+        if lock is not None:
+            _REMOTE_URL_LOCKS.move_to_end(key)
+            return lock
+        lock = Lock()
+        _REMOTE_URL_LOCKS[key] = lock
+        while len(_REMOTE_URL_LOCKS) > 256:
+            _REMOTE_URL_LOCKS.popitem(last=False)
+        return lock
+
+
 def persist_remote_generated_image(url: str):
-    _root, _key, cached_path = remote_image_cache_location(url)
-    if cached_path:
-        try:
-            with Image.open(cached_path) as image:
-                image.verify()
-            return cached_path
-        except Exception:
-            os.remove(cached_path)
-    headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0", "Accept-Encoding": "identity"}
-    response = requests_get_with_transient_retries(
-        url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT,
-        attempts=2, retry_delay=0.35, headers=headers,
-    )
-    result = cache_remote_inline_image(url, response, headers, verify_image=True)
-    if not result:
-        raise requests.RequestException("上游未返回图片类型")
-    return result[0]
+    with _remote_url_download_lock(url):
+        _root, _key, cached_path = remote_image_cache_location(url)
+        if cached_path:
+            try:
+                with Image.open(cached_path) as image:
+                    image.verify()
+                return cached_path
+            except Exception:
+                os.remove(cached_path)
+        headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0", "Accept-Encoding": "identity"}
+        response = requests_get_with_transient_retries(
+            url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT,
+            attempts=2, retry_delay=0.35, headers=headers,
+        )
+        result = cache_remote_inline_image(url, response, headers, verify_image=True)
+        if not result:
+            raise requests.RequestException("上游未返回图片类型")
+        return result[0]
+
 
 def public_canvas_image_get(url: str, **kwargs):
     current_url = url
     for _ in range(5):
         if not public_canvas_image_url(current_url):
             raise requests.RequestException("远程图片重定向到了非公网地址")
-        response = requests.get(current_url, allow_redirects=False, **kwargs)
+        response = shared_requests_get(current_url, allow_redirects=False, **kwargs)
         if response.status_code not in {301, 302, 303, 307, 308}:
             return response
         location = response.headers.get("location")
@@ -7676,23 +8064,25 @@ def public_canvas_image_get(url: str, **kwargs):
         current_url = urllib.parse.urljoin(current_url, location)
     raise requests.RequestException("远程图片重定向次数过多")
 
+
 def persist_public_canvas_image(url: str):
-    _root, _key, cached_path = remote_image_cache_location(url)
-    if cached_path:
-        try:
-            with Image.open(cached_path) as image:
-                image.verify()
-            return cached_path
-        except Exception:
-            os.remove(cached_path)
-    headers = {"User-Agent": "Infinite-Canvas/1.0", "Accept-Encoding": "identity"}
-    response = public_canvas_image_get(url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT, headers=headers)
-    result = cache_remote_inline_image(
-        url, response, headers, verify_image=True, request_get=public_canvas_image_get
-    )
-    if not result:
-        raise requests.RequestException("上游未返回图片类型")
-    return result[0]
+    with _remote_url_download_lock(url):
+        _root, _key, cached_path = remote_image_cache_location(url)
+        if cached_path:
+            try:
+                with Image.open(cached_path) as image:
+                    image.verify()
+                return cached_path
+            except Exception:
+                os.remove(cached_path)
+        headers = {"User-Agent": "Infinite-Canvas/1.0", "Accept-Encoding": "identity"}
+        response = public_canvas_image_get(url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT, headers=headers)
+        result = cache_remote_inline_image(
+            url, response, headers, verify_image=True, request_get=public_canvas_image_get
+        )
+        if not result:
+            raise requests.RequestException("上游未返回图片类型")
+        return result[0]
 
 def schedule_remote_generated_image_cache(url: str):
     global REMOTE_IMAGE_BACKGROUND_LIMITER, REMOTE_IMAGE_BACKGROUND_LOOP
@@ -8745,6 +9135,67 @@ def convert_output_to_jpg(url, quality=88):
         print(f"转换 JPG 失败: {e}")
         return url
 
+_ENCODED_IMAGE_DATA_URL_CACHE: OrderedDict = OrderedDict()
+_ENCODED_IMAGE_CACHE_LOCK = Lock()
+_ENCODED_IMAGE_CACHE_MAX_ITEMS = 96
+
+
+def image_has_meaningful_alpha(img: Image.Image) -> bool:
+    """检测图片是否真正含有大面积透明背景/镂空（忽略边缘轻微抗锯齿如 alpha >= 160）。"""
+    try:
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            rgba = img if img.mode == "RGBA" else img.convert("RGBA")
+            extrema = rgba.getchannel("A").getextrema()
+            if extrema and extrema[0] < 160:
+                return True
+    except Exception:
+        return image_has_alpha(img)
+    return False
+
+
+def _flatten_image_to_rgb(img: Image.Image) -> Image.Image:
+    if img.mode == "RGB":
+        return img
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGB", rgba.size, (255, 255, 255))
+        bg.paste(rgba, mask=rgba.split()[-1])
+        return bg
+    return img.convert("RGB")
+
+
+def compact_multipart_image_bytes(filename: str, content: bytes, mime: str, is_mask: bool = False) -> Tuple[str, bytes, str]:
+    """对超过 600KB 的非蒙版参考图做高画质轻量压缩（不透明大图转 JPEG Q90 / 最长边 2048），防止上传耗时几十秒或报 413。"""
+    if is_mask or len(content) <= 600 * 1024:
+        return (filename, content, mime)
+    try:
+        with Image.open(BytesIO(content)) as src:
+            img = ImageOps.exif_transpose(src)
+            img.load()
+            has_alpha = image_has_meaningful_alpha(img)
+            if max(img.size) > 2048:
+                img.thumbnail((2048, 2048), Image.LANCZOS)
+            buf = BytesIO()
+            stem = os.path.splitext(filename or "reference")[0] or "reference"
+            if has_alpha:
+                if img.mode != "RGBA":
+                    img = img.convert("RGBA")
+                img.save(buf, format="PNG", optimize=True)
+                out_bytes = buf.getvalue()
+                if len(out_bytes) < len(content):
+                    return (f"{stem}.png", out_bytes, "image/png")
+            else:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(buf, format="JPEG", quality=90, optimize=True)
+                out_bytes = buf.getvalue()
+                if len(out_bytes) < len(content):
+                    return (f"{stem}.jpg", out_bytes, "image/jpeg")
+    except Exception:
+        pass
+    return (filename, content, mime)
+
+
 def inline_image_edit_file(ref):
     """Decode a canvas data URL into an OpenAI multipart image/mask file."""
     header, separator, encoded = str(ref.get("url") or "").partition(",")
@@ -8758,34 +9209,87 @@ def inline_image_edit_file(ref):
     if not content:
         raise HTTPException(status_code=400, detail="参考图内容为空，请重新添加图片。")
     extension = mimetypes.guess_extension(mime) or ".png"
-    return ("reference" + extension, content, mime)
+    is_mask = str(ref.get("role") or "").strip().lower() == "mask"
+    return compact_multipart_image_bytes("reference" + extension, content, mime, is_mask=is_mask)
+
+
+def _encode_path_to_data_url(path: str, max_size: Optional[int] = None, jpeg_quality: int = 86, flatten_alpha: bool = False) -> str:
+    abs_path = os.path.abspath(path)
+    try:
+        st = os.stat(abs_path)
+        cache_key = (abs_path, st.st_mtime_ns, st.st_size, int(max_size or 0), int(jpeg_quality), bool(flatten_alpha))
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _ENCODED_IMAGE_CACHE_LOCK:
+            cached = _ENCODED_IMAGE_DATA_URL_CACHE.get(cache_key)
+            if cached is not None:
+                _ENCODED_IMAGE_DATA_URL_CACHE.move_to_end(cache_key)
+                return cached
+
+    result = None
+    # 当指定了 max_size，或原文件较大（> 512KB）时，自动将不透明 RGBA/PNG 转为高质 JPEG，体积直降 85~95%
+    should_optimize = bool(max_size) or flatten_alpha or (cache_key is not None and cache_key[2] > 512 * 1024)
+    if should_optimize:
+        try:
+            with Image.open(abs_path) as src:
+                img = ImageOps.exif_transpose(src)
+                img.load()
+                w, h = img.size
+                if max_size and max(w, h) > max_size:
+                    img.thumbnail((max_size, max_size), Image.LANCZOS)
+                has_alpha = False if flatten_alpha else image_has_meaningful_alpha(img)
+                buf = BytesIO()
+                if has_alpha:
+                    if img.mode != "RGBA":
+                        img = img.convert("RGBA")
+                    img.save(buf, format="PNG", optimize=True)
+                    mime = "image/png"
+                else:
+                    rgb_img = _flatten_image_to_rgb(img)
+                    rgb_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+                    mime = "image/jpeg"
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                result = f"data:{mime};base64,{encoded}"
+        except Exception as e:
+            print(f"reference resize failed, fallback to raw: {e}")
+
+    if result is None:
+        with open(abs_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        result = f"data:{content_type_for_path(abs_path)};base64,{encoded}"
+
+    if cache_key is not None and len(result) < 8 * 1024 * 1024:
+        with _ENCODED_IMAGE_CACHE_LOCK:
+            _ENCODED_IMAGE_DATA_URL_CACHE[cache_key] = result
+            while len(_ENCODED_IMAGE_DATA_URL_CACHE) > _ENCODED_IMAGE_CACHE_MAX_ITEMS:
+                _ENCODED_IMAGE_DATA_URL_CACHE.popitem(last=False)
+    return result
+
+
+def resolve_reference_local_path(url_or_ref) -> Optional[str]:
+    """统一解析本地参考图路径：同时支持 /assets/、/output/、/api/storage-files/ 以及已缓存的远程图片。"""
+    raw = url_or_ref.get("url", "") if isinstance(url_or_ref, dict) else str(url_or_ref or "")
+    raw = str(raw or "").strip()
+    if not raw or raw.startswith("data:"):
+        return None
+    local_path = output_file_from_url(raw)
+    if local_path and os.path.isfile(local_path):
+        return local_path
+    if raw.startswith(("http://", "https://")):
+        _root, _key, cached_path = remote_image_cache_location(raw)
+        if cached_path and os.path.isfile(cached_path):
+            return cached_path
+    return None
 
 
 def reference_to_data_url(ref, max_size=None):
-    """把本地输出文件转为 data URL（base64）。max_size 限制最长边像素，避免 payload 过大。"""
-    path = output_file_from_url(ref.get("url", ""))
+    """把本地输出文件或本地远程缓存转为压缩后的 data URL（base64），带内存缓存避免重复编码。"""
+    raw_url = ref.get("url", "") if isinstance(ref, dict) else str(ref or "")
+    path = resolve_reference_local_path(raw_url)
     if not path:
-        return ref.get("url", "")
-    if max_size:
-        try:
-            with Image.open(path) as img:
-                img.load()
-                w, h = img.size
-                if max(w, h) > max_size:
-                    img.thumbnail((max_size, max_size), Image.LANCZOS)
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGB")
-                buf = BytesIO()
-                fmt = "PNG" if img.mode == "RGBA" else "JPEG"
-                img.save(buf, format=fmt, quality=88 if fmt == "JPEG" else None)
-                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-                mime = "image/png" if fmt == "PNG" else "image/jpeg"
-                return f"data:{mime};base64,{encoded}"
-        except Exception as e:
-            print(f"reference resize failed, fallback to raw: {e}")
-    with open(path, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{content_type_for_path(path)};base64,{encoded}"
+        return raw_url
+    return _encode_path_to_data_url(path, max_size=max_size)
 
 def is_image_reference(ref):
     if not isinstance(ref, dict):
@@ -9027,11 +9531,34 @@ def attachment_text_blocks(refs, limit_each=MAX_ATTACHMENT_TEXT_CHARS):
     return blocks
 
 def media_reference_to_url(value, max_image_size=None):
+    """将画布/对话中的媒体引用转换为上游模型可直接消费的轻量 URL/DataURL。
+    优先命中本地文件与 remote-images 本地缓存并做 JPEG 压缩，彻底避免把过期签名链接发给对话中转站引发超时或 400。"""
     if not isinstance(value, str) or not value:
         return ""
-    if value.startswith("/output/") or value.startswith("/assets/"):
-        return reference_to_data_url({"url": value}, max_size=max_image_size)
-    return value
+    clean = value.strip()
+    if not clean:
+        return ""
+    if clean.startswith("data:image/"):
+        return compress_data_url_image(clean, max_size=max_image_size or 1280, jpeg_quality=85)
+    local_path = resolve_reference_local_path(clean)
+    if local_path:
+        if asset_library_media_kind(local_path) == "image":
+            return _encode_path_to_data_url(local_path, max_size=max_image_size or 1280, flatten_alpha=True)
+        return reference_to_data_url({"url": clean}, max_size=max_image_size)
+    if clean.startswith(("/output/", "/assets/", "/api/storage-files/")):
+        return ""
+    if clean.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlsplit(clean)
+        # 对易过期或需鉴权/跨境的临时媒体链接（如 soonstudio.ai/api/media/），先尝试本地缓存转换；失效则优雅跳过而非炸掉整个 LLM 请求
+        if parsed.hostname == "soonstudio.ai" and parsed.path.startswith("/api/media/"):
+            try:
+                cached_path = persist_public_canvas_image(clean)
+                if cached_path and os.path.isfile(cached_path):
+                    return _encode_path_to_data_url(cached_path, max_size=max_image_size or 1024)
+            except Exception as exc:
+                LOG.warning("llm_skip_expired_remote_media host=%s error=%s", parsed.hostname, type(exc).__name__)
+                return ""
+    return clean
 
 def is_private_asset_url(value: str) -> bool:
     return isinstance(value, str) and value.strip().startswith("asset://")
@@ -9044,8 +9571,9 @@ def volcengine_media_reference_url(value, max_image_size=1536):
         return ""
     if is_private_asset_url(value):
         return value
-    if value.startswith("/output/") or value.startswith("/assets/"):
-        return reference_to_data_url({"url": value}, max_size=max_image_size)
+    local_path = resolve_reference_local_path(value)
+    if local_path:
+        return _encode_path_to_data_url(local_path, max_size=max_image_size)
     return value
 
 def looks_like_image_media_url(value: str) -> bool:
@@ -9197,17 +9725,20 @@ async def video_reference_to_frame_data_urls(value, max_frames=6, max_size=768):
             try: os.remove(cleanup_path)
             except OSError: pass
 
-def compress_data_url_image(value, max_size=1536, jpeg_quality=88):
+def compress_data_url_image(value, max_size=1536, jpeg_quality=88, raise_on_invalid=False):
     if not isinstance(value, str) or not value.startswith("data:image/") or ";base64," not in value:
+        if raise_on_invalid:
+            raise ValueError("Invalid data:image URL")
         return value
     header, encoded = value.split(";base64,", 1)
     try:
         raw = base64.b64decode(encoded)
-        with Image.open(BytesIO(raw)) as img:
+        with Image.open(BytesIO(raw)) as src:
+            img = ImageOps.exif_transpose(src)
             img.load()
             if max_size and max(img.size) > max_size:
                 img.thumbnail((max_size, max_size), Image.LANCZOS)
-            has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
+            has_alpha = image_has_meaningful_alpha(img)
             if has_alpha:
                 if img.mode != "RGBA":
                     img = img.convert("RGBA")
@@ -9223,6 +9754,8 @@ def compress_data_url_image(value, max_size=1536, jpeg_quality=88):
                 img.save(buf, format=fmt, optimize=True)
             return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
     except Exception as e:
+        if raise_on_invalid:
+            raise
         print(f"data url image compress failed, fallback to raw: {e}")
         return value
 
@@ -9231,18 +9764,23 @@ SOONSTUDIO_SEEDREAM_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 def soonstudio_seedream_reference_url(ref, max_size=1536):
     value = str((ref or {}).get("url") or "").strip()
     if value.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.hostname == "soonstudio.ai" and parsed.path.startswith("/api/media/"):
+            _root, _key, cached_path = remote_image_cache_location(value)
+            if cached_path and os.path.isfile(cached_path):
+                return _encode_path_to_data_url(cached_path, max_size=max_size, jpeg_quality=85)
         return value
     if value.startswith("data:"):
-        compressed = compress_data_url_image(value, max_size=max_size, jpeg_quality=85)
-        if compressed == value:
-            raise HTTPException(status_code=400, detail="SoonStudio Seedream 参考图无法读取或压缩，请换用有效图片。")
-        return compressed
+        try:
+            return compress_data_url_image(value, max_size=max_size, jpeg_quality=85, raise_on_invalid=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="SoonStudio Seedream 参考图无法读取或压缩，请换用有效图片。") from exc
     return reference_to_data_url(ref, max_size=max_size)
 
 def modelscope_image_url(value, max_size=1536):
     if not value:
         return value
-    if isinstance(value, str) and (value.startswith("/output/") or value.startswith("/assets/")):
+    if isinstance(value, str) and resolve_reference_local_path(value):
         return reference_to_data_url({"url": value}, max_size=max_size)
     return value
 
@@ -10104,30 +10642,56 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             except Exception:
                 pass
 
-        timeout = httpx.Timeout(connect=4.0, read=6.0, write=8.0, pool=4.0)
-        media_url = urllib.parse.urlsplit(value)
-        soonstudio_media = media_url.hostname == "soonstudio.ai" and media_url.path.startswith("/api/media/")
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=not soonstudio_media) as client:
-            response = await asyncio.wait_for(
-                httpx_request_with_transient_retries(
-                    client, "GET", value, attempts=2, retry_delay=0.35
-                ),
-                timeout=5.0,
-            )
-            response.raise_for_status()
-            if not response.content:
-                schedule_remote_generated_image_cache(value)
-                return value
-            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-            extension = REMOTE_IMAGE_CACHE_MIME_EXTS.get(content_type)
-            if not extension:
-                remote_extension = os.path.splitext(urllib.parse.urlsplit(value).path)[1].lower()
-                extension = remote_extension if remote_extension in REMOTE_IMAGE_CACHE_EXTS else ".png"
-            filename = f"{filename_stem}{extension}"
-            path = output_path_for(filename, category)
+        timeout = httpx.Timeout(connect=8.0, read=22.0, write=10.0, pool=8.0)
+        prefer_proxy = provider_trust_env()
+        response = None
+        try:
+            async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=prefer_proxy) as client:
+                response = await asyncio.wait_for(
+                    httpx_request_with_transient_retries(
+                        client, "GET", value, attempts=2, retry_delay=0.35
+                    ),
+                    timeout=25.0,
+                )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError):
+            if prefer_proxy and httpx.AsyncClient is _ORIGINAL_HTTPX_ASYNC_CLIENT:
+                async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=False) as direct_client:
+                    response = await asyncio.wait_for(
+                        httpx_request_with_transient_retries(
+                            direct_client, "GET", value, attempts=2, retry_delay=0.35
+                        ),
+                        timeout=25.0,
+                    )
+            else:
+                raise
+        response.raise_for_status()
+        if not response.content:
+            schedule_remote_generated_image_cache(value)
+            return value
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        extension = REMOTE_IMAGE_CACHE_MIME_EXTS.get(content_type)
+        if not extension:
+            remote_extension = os.path.splitext(urllib.parse.urlsplit(value).path)[1].lower()
+            extension = remote_extension if remote_extension in REMOTE_IMAGE_CACHE_EXTS else ".png"
+        filename = f"{filename_stem}{extension}"
+        path = output_path_for(filename, category)
+
+        def _write_local_and_cache(payload_bytes: bytes):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as f:
-                f.write(response.content)
-            return output_url_for(filename, category)
+                f.write(payload_bytes)
+            if extension in REMOTE_IMAGE_CACHE_EXTS:
+                try:
+                    os.makedirs(_cache_root, exist_ok=True)
+                    rc_path = os.path.join(_cache_root, f"{_cache_key}{extension}")
+                    if not os.path.exists(rc_path):
+                        with open(rc_path, "wb") as cf:
+                            cf.write(payload_bytes)
+                except OSError:
+                    pass
+
+        await asyncio.to_thread(_write_local_and_cache, response.content)
+        return output_url_for(filename, category)
     except Exception as e:
         media_url = urllib.parse.urlsplit(value)
         LOG.warning(
@@ -12101,7 +12665,7 @@ async def generate_grsai_provider_image(prompt, size, model, reference_images=No
         body["aspectRatio"] = grsai_aspect_ratio(size, aspect_ratio)
         body["imageSize"] = grsai_image_size(resolution, model_value, size)
     timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=provider_trust_env(provider)) as client:
         response = await client.post(generate_url, headers=api_headers(provider=provider, model=model_value), json=body)
         response.raise_for_status()
         raw = response.json()
@@ -12114,9 +12678,11 @@ async def generate_grsai_provider_image(prompt, size, model, reference_images=No
             task_id = str(raw.get("id") or raw.get("task_id") or "").strip() if isinstance(raw, dict) else ""
             if not task_id:
                 raise
-        deadline = time.monotonic() + 1800
+        started = time.monotonic()
+        deadline = started + 1800
         while time.monotonic() < deadline:
-            await asyncio.sleep(2.5)
+            step_sleep = 1.4 if (time.monotonic() - started) < 35.0 else 2.4
+            await asyncio.sleep(step_sleep)
             poll = await client.get(result_url, params={"id": task_id}, headers=api_headers(provider=provider, model=model_value))
             poll.raise_for_status()
             last = poll.json()
@@ -12172,7 +12738,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
     is_soonstudio = is_soonstudio_provider(provider)
-    is_soonstudio_seedream = is_soonstudio and model.lower() in {"dola-seedream-5.0-flash", "seedream-v5-pro"}
+    model_lower = str(model or "").strip().lower()
+    is_soonstudio_seedream = is_soonstudio and ("seedream" in model_lower)
     comfly_async = is_comfly_seedream_async_provider(provider, model)
     if is_soonstudio_seedream and mask_refs:
         raise HTTPException(status_code=400, detail="SoonStudio Seedream 的 JSON 接口未声明蒙版支持，已停止提交，避免忽略局部编辑范围。")
@@ -12183,7 +12750,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or is_soonstudio or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
     if comfly_async:
         request_timeout = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=15.0)
-    async with httpx.AsyncClient(timeout=request_timeout, trust_env=not is_soonstudio) as client:
+    async with shared_async_http_client(timeout=request_timeout, trust_env=provider_trust_env(provider)) as client:
         response = None
         async def post_openai_edits(edit_files=None):
             data = {"model": model, "prompt": prompt, "size": size}
@@ -12200,8 +12767,10 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         if is_soonstudio_seedream:
             requested_resolution = str(resolution or "").strip().lower()
             allowed_resolutions = {"1k", "2k"}
-            if model.lower() == "dola-seedream-5.0-flash":
+            if model_lower == "dola-seedream-5.0-flash":
                 allowed_resolutions.add("1.5k")
+            if "v5.5" in model_lower or "4k" in model_lower:
+                allowed_resolutions.add("4k")
             if requested_resolution not in allowed_resolutions:
                 requested_resolution = "2k"
             body = {
@@ -12212,11 +12781,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "response_format": "url",
             }
             if image_refs:
+                def _encode_seedream_refs(ms: int):
+                    return [soonstudio_seedream_reference_url(ref, max_size=ms) for ref in image_refs]
+
                 for max_size in (1536, 1024, 768):
-                    body["imageUrls"] = [
-                        soonstudio_seedream_reference_url(ref, max_size=max_size)
-                        for ref in image_refs
-                    ]
+                    body["imageUrls"] = await asyncio.to_thread(_encode_seedream_refs, max_size)
                     body_size = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
                     if body_size <= SOONSTUDIO_SEEDREAM_MAX_REQUEST_BYTES:
                         break
@@ -12339,30 +12908,48 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             edit_failed_status = None
             edit_failed_text = ""
             try:
+                def _prepare_local_multipart(file_path: str, is_mask: bool = False):
+                    with open(file_path, "rb") as fh_in:
+                        raw_bytes = fh_in.read()
+                    return compact_multipart_image_bytes(
+                        os.path.basename(file_path),
+                        raw_bytes,
+                        content_type_for_path(file_path),
+                        is_mask=is_mask,
+                    )
+
                 for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]:
-                    if str(ref.get("url") or "").startswith("data:"):
-                        files.append(("image", inline_image_edit_file(ref)))
+                    ref_url = str(ref.get("url") or "").strip()
+                    if ref_url.startswith("data:"):
+                        files.append(("image", await asyncio.to_thread(inline_image_edit_file, ref)))
                         continue
-                    path = output_file_from_url(ref.get("url", ""))
-                    if not path:
+                    path = output_file_from_url(ref_url) or resolve_reference_local_path(ref_url)
+                    if not path and ref_url.startswith(("http://", "https://")):
+                        try:
+                            path = await asyncio.to_thread(persist_public_canvas_image, ref_url)
+                        except Exception:
+                            path = None
+                    if not path or not os.path.isfile(path):
                         continue
-                    fh = open(path, "rb")
-                    opened.append(fh)
-                    files.append(("image", (os.path.basename(path), fh, content_type_for_path(path))))
+                    files.append(("image", await asyncio.to_thread(_prepare_local_multipart, path, False)))
                 if mask_refs:
-                    if str(mask_refs[0].get("url") or "").startswith("data:"):
-                        files.append(("mask", inline_image_edit_file(mask_refs[0])))
-                    mask_path = output_file_from_url(mask_refs[0].get("url", ""))
-                    if mask_path:
-                        fh = open(mask_path, "rb")
-                        opened.append(fh)
-                        files.append(("mask", (os.path.basename(mask_path), fh, content_type_for_path(mask_path))))
+                    mask_url = str(mask_refs[0].get("url") or "").strip()
+                    if mask_url.startswith("data:"):
+                        files.append(("mask", await asyncio.to_thread(inline_image_edit_file, mask_refs[0])))
+                    mask_path = output_file_from_url(mask_url) or resolve_reference_local_path(mask_url)
+                    if mask_path and os.path.isfile(mask_path):
+                        files.append(("mask", await asyncio.to_thread(_prepare_local_multipart, mask_path, True)))
                 try:
-                    response = await post_openai_edits(files)
-                    if response.status_code >= 400:
-                        edit_failed_status = response.status_code
-                        edit_failed_text = response.text[:500]
+                    if not files:
+                        edit_failed_status = 400
+                        edit_failed_text = "未找到可读取的参考图文件"
                         response = None
+                    else:
+                        response = await post_openai_edits(files)
+                        if response.status_code >= 400:
+                            edit_failed_status = response.status_code
+                            edit_failed_text = response.text[:500]
+                            response = None
                 except httpx.HTTPError as e:
                     edit_failed_status = -1
                     edit_failed_text = str(e)
@@ -12448,7 +13035,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             setattr(error, "upstream_task_id", task_id)
             raise error from exc
 
-def upstream_message_from_record(item):
+def upstream_message_from_record(item, include_images: bool = True, max_image_size: int = 1280):
     role = item.get("role")
     if role not in {"user", "assistant"} or item.get("type") == "image":
         return None
@@ -12458,17 +13045,48 @@ def upstream_message_from_record(item):
         blocks = attachment_text_blocks(attachments)
         if blocks:
             text = f"{text}\n\n以下是用户上传附件的可读内容，请在回答时参考：\n\n" + "\n\n---\n\n".join(blocks)
+        img_refs = image_references(attachments[:CHAT_ATTACHMENT_MAX])
+        if not include_images:
+            if img_refs:
+                names = "、".join((r.get("name") or "图片") for r in img_refs[:4])
+                text = f"{text}\n[历史上传参考图：{names}]".strip()
+            return {"role": role, "content": text}
         content = [{"type": "text", "text": text}]
         image_urls = []
-        for ref in image_references(attachments[:CHAT_ATTACHMENT_MAX]):
-            url = reference_to_data_url(ref)
+        seen_urls = set()
+        for ref in img_refs:
+            raw_u = str(ref.get("url") or "").strip()
+            if not raw_u or raw_u in seen_urls:
+                continue
+            seen_urls.add(raw_u)
+            url = media_reference_to_url(raw_u, max_image_size=max_image_size) or reference_to_data_url(ref, max_size=max_image_size)
             if url:
                 image_urls.append(url)
         image_urls.extend(attachment_embedded_image_data_urls(attachments[:CHAT_ATTACHMENT_MAX], max_images=max(0, CHAT_ATTACHMENT_MAX - len(image_urls))))
+        if not image_urls:
+            return {"role": role, "content": text}
         for url in image_urls[:CHAT_ATTACHMENT_MAX]:
             content.append({"type": "image_url", "image_url": {"url": url}})
         return {"role": role, "content": content}
     return {"role": role, "content": item.get("content", "")}
+
+
+def build_chat_history_messages(history_records: list, max_vision_turns: int = 4, max_image_size: int = 1280) -> List[dict]:
+    """只对最近 max_vision_turns 条含图消息附带压缩后的视觉图片，更早历史转为轻量文本标记，避免多轮对话每轮重复重传几十 MB Base64。"""
+    records = list(history_records or [])
+    vision_indices = [
+        idx for idx, item in enumerate(records)
+        if isinstance(item, dict) and item.get("role") == "user" and image_references(item.get("attachments") or [])
+    ]
+    keep_vision = set(vision_indices[-max(1, int(max_vision_turns)):])
+    out = []
+    for idx, item in enumerate(records):
+        if not isinstance(item, dict):
+            continue
+        msg = upstream_message_from_record(item, include_images=(idx in keep_vision), max_image_size=max_image_size)
+        if msg:
+            out.append(msg)
+    return out
 
 AGENT_ACTIONS = {"chat", "generate_image", "edit_image"}
 AGENT_IMAGE_KEYWORDS = [
@@ -12595,6 +13213,19 @@ def parse_agent_decision(raw_text, message, refs, has_previous_image):
         action = "generate_image" if any(key.lower() in str(message).lower() for key in AGENT_IMAGE_KEYWORDS) else "chat"
     return {"action": action, "prompt": prompt, "reply": reply}
 
+def message_may_need_image_router(message: str, has_previous_image: bool = False) -> bool:
+    """快速判断输入是否可能涉及生图/改图：明显纯文本问答/写文案走 0ms 本地直通，跳过第一次阻塞路由大模型请求。"""
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    extra_hints = ("绘制", "作图", "配图", "主图", "详情图", "做一张", "来一张", "设计一张", "换背景", "抠图", "扩图", "poster", "avatar", "wallpaper", "illustration")
+    if any(k.lower() in text for k in AGENT_IMAGE_KEYWORDS) or any(h in text for h in extra_hints):
+        return True
+    if has_previous_image and any(k.lower() in text for k in AGENT_EDIT_KEYWORDS):
+        return True
+    return False
+
+
 async def decide_chat_agent_action(payload, conversation, refs):
     has_previous_image = bool(latest_chat_image_refs(conversation, 1))
     fallback = heuristic_agent_decision(payload.message, refs, has_previous_image)
@@ -12606,6 +13237,11 @@ async def decide_chat_agent_action(payload, conversation, refs):
         fallback["router_model"] = selected_model(payload.model, (provider_cfg.get("chat_models") or GEMINI_CLI_DEFAULT_CHAT_MODELS)[0])
         return fallback
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
+    reasoning_opts = chat_reasoning_options(payload, model)
+    # 明确纯文本对话且未附带参考图时，0ms 本地直通进入流式回复，避免串行调两次大模型浪费十几秒首字时间
+    if not refs and not reasoning_opts and not message_may_need_image_router(payload.message, has_previous_image):
+        fallback["router_model"] = model
+        return fallback
     history = conversation["messages"][-MAX_HISTORY_MESSAGES:]
     custom_system_prompt = chat_system_prompt(payload)
     system = (
@@ -12618,8 +13254,9 @@ async def decide_chat_agent_action(payload, conversation, refs):
         "reply 是可选的短状态文本。"
     )
     upstream_messages = [{"role": "system", "content": system}]
-    for item in history[-10:]:
-        msg = upstream_message_from_record(item)
+    # 路由阶段仅需轻量文本上下文，不重复上传历史多轮大图 Base64
+    for item in history[-8:]:
+        msg = upstream_message_from_record(item, include_images=False)
         if msg:
             upstream_messages.append(msg)
     upstream_messages.append({
@@ -12632,9 +13269,10 @@ async def decide_chat_agent_action(payload, conversation, refs):
             "请返回 JSON，例如 {\"action\":\"generate_image\",\"prompt\":\"...\",\"reply\":\"...\"}"
         )
     })
+    router_timeout = httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=15.0)
     try:
-        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
+        async with shared_async_http_client(timeout=router_timeout, trust_env=provider_trust_env(provider_cfg)) as client:
+            req_body = {"model": model, "messages": upstream_messages, **reasoning_opts}
             if is_apimart_provider(provider_cfg):
                 req_body["stream"] = False
             response = await client.post(
@@ -12644,21 +13282,46 @@ async def decide_chat_agent_action(payload, conversation, refs):
             )
             response.raise_for_status()
             raw = response.json()
+            error = chat_response_error(raw)
+            if error:
+                raise HTTPException(status_code=502, detail=error)
             decision = parse_agent_decision(text_from_chat_response(raw), payload.message, refs, has_previous_image)
             decision["router_model"] = model
             return decision
     except Exception as exc:
+        if reasoning_opts:
+            if isinstance(exc, HTTPException):
+                raise
+            if isinstance(exc, httpx.HTTPStatusError):
+                body = exc.response.text or ""
+                friendly = friendly_chat_error_detail(body, model, provider_cfg)
+                raise HTTPException(
+                    status_code=exc.response.status_code,
+                    detail=friendly or f"上游接口错误：{body[:1000]}",
+                ) from exc
+            if isinstance(exc, httpx.HTTPError):
+                log_net_error("对话 Agent 路由 网络/TLS错误", exc)
+                raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
         print(f"[chat-agent] intent router fallback: {exc}")
         fallback["router_model"] = model
         return fallback
 
-async def build_chat_text_reply(payload, conversation):
+async def iter_chat_text_reply(payload, conversation):
     provider_cfg = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
-    if is_codex_provider(provider_cfg):
-        model = selected_model(payload.model, (provider_cfg.get("chat_models") or CODEX_DEFAULT_CHAT_MODELS)[0])
+    is_codex = is_codex_provider(provider_cfg)
+    is_gemini_cli = is_gemini_cli_provider(provider_cfg)
+    if is_codex or is_gemini_cli:
+        defaults = CODEX_DEFAULT_CHAT_MODELS if is_codex else GEMINI_CLI_DEFAULT_CHAT_MODELS
+        model = selected_model(payload.model, (provider_cfg.get("chat_models") or defaults)[0])
         payload.model = model
-        text, raw = await codex_chat_text(payload, conversation["messages"][-MAX_HISTORY_MESSAGES:])
-        return {
+        label = "OpenAI CLI" if is_codex else gemini_cli_display_name()
+        yield {"type": "status", "stage": "cli", "message": f"正在等待 {label}，该线路会在完成后一次返回文本。"}
+        runner = codex_chat_text if is_codex else gemini_cli_chat_text
+        text, raw = await runner(payload, conversation["messages"][-MAX_HISTORY_MESSAGES:])
+        if not str(text or "").strip():
+            raise HTTPException(status_code=502, detail=f"{label} 返回了空回复。")
+        yield {"type": "delta", "delta": text}
+        yield {"type": "message", "message": {
             "id": uuid.uuid4().hex,
             "role": "assistant",
             "content": text,
@@ -12666,50 +13329,193 @@ async def build_chat_text_reply(payload, conversation):
             "model": model,
             "raw_usage": None,
             "raw": raw,
-        }
-    if is_gemini_cli_provider(provider_cfg):
-        model = selected_model(payload.model, (provider_cfg.get("chat_models") or GEMINI_CLI_DEFAULT_CHAT_MODELS)[0])
-        payload.model = model
-        text, raw = await gemini_cli_chat_text(payload, conversation["messages"][-MAX_HISTORY_MESSAGES:])
-        return {
-            "id": uuid.uuid4().hex,
-            "role": "assistant",
-            "content": text,
-            "created_at": now_ms(),
-            "model": model,
-            "raw_usage": None,
-            "raw": raw,
-        }
+        }}
+        return
+
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    is_apimart = is_apimart_provider(provider_cfg)
-    upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
-    for item in conversation["messages"][-MAX_HISTORY_MESSAGES:]:
-        msg = upstream_message_from_record(item)
-        if msg:
-            upstream_messages.append(msg)
+    history_msgs = await asyncio.to_thread(
+        build_chat_history_messages,
+        conversation["messages"][-MAX_HISTORY_MESSAGES:],
+        4,
+        1280,
+    )
+    upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}, *history_msgs]
+    req_body = {"model": model, "messages": upstream_messages, "stream": True, **chat_reasoning_options(payload, model)}
+    content_parts = []
+    reasoning_parts = []
+    raw_usage = None
+    stream_completed = True
+    yield {"type": "status", "stage": "chat", "message": "正在等待模型回复…"}
     try:
-        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-            req_body = {"model": model, "messages": upstream_messages}
-            if is_apimart:
-                req_body["stream"] = False
-            response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body)
-            response.raise_for_status()
-            raw = response.json()
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text or ""
-        friendly = friendly_chat_error_detail(body, model, provider_cfg)
-        raise HTTPException(status_code=exc.response.status_code, detail=friendly or f"上游接口错误：{body}") from exc
+        async with shared_async_http_client(timeout=AI_REQUEST_TIMEOUT, trust_env=provider_trust_env(provider_cfg)) as client:
+            async with client.stream("POST", f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    friendly = friendly_chat_error_detail(body, model, provider_cfg)
+                    raise HTTPException(status_code=response.status_code, detail=friendly or f"上游接口错误：{body[:1000]}")
+                if "text/event-stream" not in response.headers.get("content-type", "").lower():
+                    try:
+                        raw = json.loads(await response.aread())
+                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        raise HTTPException(status_code=502, detail="上游未返回有效的聊天 JSON 或事件流。") from exc
+                    error = chat_response_error(raw)
+                    if error:
+                        raise HTTPException(status_code=502, detail=error)
+                    raw_data = unwrap_apimart_response(raw)
+                    if not isinstance(raw_data, dict):
+                        raise HTTPException(status_code=502, detail="上游聊天响应格式不正确。")
+                    raw_usage = raw_data.get("usage")
+                    reasoning = reasoning_from_chat_response(raw)
+                    if reasoning:
+                        reasoning_parts.append(reasoning)
+                        yield {"type": "reasoning", "delta": reasoning}
+                    text = text_from_chat_response(raw)
+                    if text:
+                        content_parts.append(text)
+                        yield {"type": "delta", "delta": text}
+                else:
+                    stream_completed = False
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            stream_completed = True
+                            break
+                        if not data:
+                            continue
+                        try:
+                            raw = json.loads(data)
+                        except json.JSONDecodeError as exc:
+                            raise HTTPException(status_code=502, detail="上游返回了无效的聊天流数据。") from exc
+                        error = chat_response_error(raw)
+                        if error:
+                            raise HTTPException(status_code=502, detail=error)
+                        chunk = unwrap_apimart_response(raw)
+                        if not isinstance(chunk, dict):
+                            raise HTTPException(status_code=502, detail="上游聊天流响应格式不正确。")
+                        if chunk.get("usage"):
+                            raw_usage = chunk["usage"]
+                        choices = chunk.get("choices") or []
+                        if choices and isinstance(choices[0], dict) and choices[0].get("finish_reason"):
+                            stream_completed = True
+                        reasoning = reasoning_from_chat_response(chunk, streaming=True)
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            yield {"type": "reasoning", "delta": reasoning}
+                        delta = text_delta_from_chat_chunk(chunk)
+                        if delta:
+                            content_parts.append(delta)
+                            yield {"type": "delta", "delta": delta}
     except httpx.HTTPError as exc:
+        log_net_error("对话(流式) 网络/TLS错误", exc)
         raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
-    raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else raw
-    return {
+
+    if not stream_completed:
+        raise HTTPException(status_code=502, detail="上游连接中断，回复尚未完成，请重试。")
+    text = "".join(content_parts).strip()
+    if not text:
+        raise HTTPException(status_code=502, detail="接口返回了空回复，请检查当前模型和线路是否支持聊天流式输出。")
+    message = {
         "id": uuid.uuid4().hex,
         "role": "assistant",
-        "content": text_from_chat_response(raw).strip() or "接口返回了空回复。",
+        "content": text,
         "created_at": now_ms(),
         "model": model,
-        "raw_usage": raw_data.get("usage") if isinstance(raw_data, dict) else None,
+        "raw_usage": raw_usage,
     }
+    if reasoning_parts:
+        message["reasoning"] = "".join(reasoning_parts).strip()
+    yield {"type": "message", "message": message}
+
+async def iter_chat_agent_reply(payload, conversation, image_refs):
+    yield {"type": "status", "stage": "routing", "message": "正在判断本次需要聊天、生图还是改图…"}
+    decision = await decide_chat_agent_action(payload, conversation, image_refs)
+    action = decision.get("action") or "chat"
+    tool_refs = image_refs[:]
+    inherited_size = ""
+    if action == "edit_image" and not tool_refs:
+        tool_refs = latest_chat_image_refs(conversation, 1)
+        inherited_size = image_size_from_reference(tool_refs[0]) if tool_refs else ""
+    if action == "edit_image" and not tool_refs:
+        action = "generate_image"
+    if action not in AGENT_ACTIONS:
+        raise HTTPException(status_code=502, detail="Agent 返回了不支持的操作。")
+    prompt = decision.get("prompt") or payload.message
+    yield {"type": "plan", "action": action, "prompt": prompt, "reply": decision.get("reply") or ""}
+
+    if action == "chat":
+        async for event in iter_chat_text_reply(payload, conversation):
+            if event["type"] == "message":
+                event["message"]["agent_action"] = "chat"
+                event["agent"] = {"action": action, "decision": decision}
+            yield event
+        return
+
+    image_provider = pick_chat_image_provider(payload.image_provider or payload.provider, payload.provider)
+    default_model = (image_provider.get("image_models") or [IMAGE_MODEL])[0]
+    model = selected_model(payload.image_model or default_model, default_model)
+    prompt_size = chat_prompt_size_override(payload.message, payload.size) or chat_prompt_size_override(prompt, payload.size)
+    image_size = snap_size_to_multiple(prompt_size or inherited_size or payload.size, 16)
+    requested_count = 1 if action == "edit_image" else chat_requested_image_count(payload.message)
+    prompts = chat_split_parallel_prompts(prompt, requested_count)
+    local_urls = []
+    raw_items = []
+
+    def image_message(error=""):
+        message = {
+            "id": uuid.uuid4().hex,
+            "role": "assistant",
+            "type": "image",
+            "content": prompt,
+            "image_url": local_urls[0] if local_urls else "",
+            "image_urls": local_urls[:],
+            "created_at": now_ms(),
+            "model": model,
+            "provider": image_provider["id"],
+            "size": image_size,
+            "image_count": len(local_urls),
+            "prompts": prompts,
+            "agent_action": action,
+            "agent_reply": decision.get("reply") or "",
+            "used_references": tool_refs,
+            "raw_usage": raw_items[0].get("usage") if raw_items and isinstance(raw_items[0], dict) else None,
+        }
+        if error:
+            message["incomplete"] = True
+            message["generation_error"] = error
+            message["agent_reply"] = f"已完成 {len(local_urls)}/{len(prompts)} 张图片，后续生成失败：{error}"
+        return message
+
+    try:
+        for index, item_prompt in enumerate(prompts, 1):
+            verb = "修改" if action == "edit_image" else "生成"
+            yield {"type": "status", "stage": "image", "message": f"正在{verb}第 {index}/{len(prompts)} 张图片…"}
+            image_data, raw = await generate_ai_image(
+                item_prompt, image_size, payload.quality, model, tool_refs,
+                image_provider["id"], payload.aspect_ratio, payload.resolution,
+            )
+            local_url = await save_ai_image_to_output(image_data, prefix="chat_")
+            local_urls.append(local_url)
+            raw_items.append(raw)
+            yield {"type": "image", "url": local_url, "index": index, "total": len(prompts)}
+    except Exception as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            text = exc.response.text or ""
+            detail = friendly_image_error_detail(text, image_size, model) or f"上游生图接口错误：{text[:300]}"
+            failure = HTTPException(status_code=exc.response.status_code, detail=detail)
+        elif isinstance(exc, httpx.HTTPError):
+            log_net_error(f"对话生图 网络/TLS错误 model={model}", exc)
+            failure = HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}")
+        elif isinstance(exc, HTTPException):
+            failure = exc
+        else:
+            LOG.exception("chat_agent_image_failed")
+            failure = HTTPException(status_code=502, detail="图片处理失败，请查看服务日志。")
+        if local_urls:
+            yield {"type": "partial", "message": image_message(str(failure.detail))}
+        raise failure
+    yield {"type": "message", "message": image_message(), "agent": {"action": action, "decision": decision}}
 
 # --- 路由接口 ---
 
@@ -12748,6 +13554,7 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
         filename = sanitize_export_filename(os.path.basename(name) if name else os.path.basename(path), os.path.basename(path))
         return FileResponse(path, media_type=content_type_for_path(path), filename=None if inline else filename)
     parsed = urllib.parse.urlparse(str(url or "").strip())
+    range_header = request.headers.get("range")
     if parsed.scheme in ("http", "https") and parsed.netloc:
         _cache_root, _cache_key, cached_remote_image = remote_image_cache_location(url)
         if cached_remote_image:
@@ -12764,42 +13571,62 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
         return FileResponse(path, media_type=content_type_for_path(path), filename=None if inline else filename)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=400, detail="无效的下载地址")
-    try:
-        upstream_headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0"}
-        if inline:
-            upstream_headers["Accept-Encoding"] = "identity"
-        range_header = request.headers.get("range")
-        if range_header:
-            upstream_headers["Range"] = range_header
-        upstream = requests_get_with_transient_retries(
-            url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT if inline and not range_header else (10, 60),
-            attempts=2 if inline and not range_header else 3, retry_delay=0.35,
-            headers=upstream_headers,
-        )
-        upstream.raise_for_status()
-    except requests.RequestException as exc:
-        LOG.warning(
-            "remote_output_download_failed host=%s status=%s error_type=%s",
-            parsed.hostname or "unknown",
-            getattr(getattr(exc, "response", None), "status_code", ""),
-            type(exc).__name__,
-        )
-        raise HTTPException(status_code=502, detail=f"远程文件下载失败：{exc}")
-    content_type = upstream.headers.get("content-type") or "application/octet-stream"
-    normalized_content_type = content_type.split(";", 1)[0].strip().lower()
-    if inline and not range_header and upstream.status_code == 200 and normalized_content_type in REMOTE_IMAGE_CACHE_MIME_EXTS:
+    if inline and not range_header:
+        with _remote_url_download_lock(url):
+            _cache_root, _cache_key, cached_after_wait = remote_image_cache_location(url)
+            if cached_after_wait:
+                return FileResponse(cached_after_wait, media_type=remote_image_content_type(cached_after_wait))
+            try:
+                upstream_headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0", "Accept-Encoding": "identity"}
+                upstream = requests_get_with_transient_retries(
+                    url, stream=True, timeout=REMOTE_INLINE_IMAGE_TIMEOUT,
+                    attempts=2, retry_delay=0.35,
+                    headers=upstream_headers,
+                )
+                upstream.raise_for_status()
+            except requests.RequestException as exc:
+                LOG.warning(
+                    "remote_output_download_failed host=%s status=%s error_type=%s",
+                    parsed.hostname or "unknown",
+                    getattr(getattr(exc, "response", None), "status_code", ""),
+                    type(exc).__name__,
+                )
+                raise HTTPException(status_code=502, detail=f"远程文件下载失败：{exc}")
+            content_type = upstream.headers.get("content-type") or "application/octet-stream"
+            normalized_content_type = content_type.split(";", 1)[0].strip().lower()
+            if upstream.status_code == 200 and normalized_content_type in REMOTE_IMAGE_CACHE_MIME_EXTS:
+                try:
+                    cached = cache_remote_inline_image(url, upstream, upstream_headers)
+                except requests.RequestException as exc:
+                    LOG.warning(
+                        "remote_inline_image_download_failed host=%s error_type=%s",
+                        parsed.hostname or "unknown",
+                        type(exc).__name__,
+                    )
+                    raise HTTPException(status_code=502, detail="远程图片下载失败，请稍后重试") from exc
+                if cached:
+                    cached_path, cached_content_type = cached
+                    return FileResponse(cached_path, media_type=cached_content_type)
+    else:
         try:
-            cached = cache_remote_inline_image(url, upstream, upstream_headers)
+            upstream_headers = {"User-Agent": "ComfyUI-API-Modelscope/1.0"}
+            if range_header:
+                upstream_headers["Range"] = range_header
+            upstream = requests_get_with_transient_retries(
+                url, stream=True, timeout=(10, 60),
+                attempts=3, retry_delay=0.35,
+                headers=upstream_headers,
+            )
+            upstream.raise_for_status()
         except requests.RequestException as exc:
             LOG.warning(
-                "remote_inline_image_download_failed host=%s error_type=%s",
+                "remote_output_download_failed host=%s status=%s error_type=%s",
                 parsed.hostname or "unknown",
+                getattr(getattr(exc, "response", None), "status_code", ""),
                 type(exc).__name__,
             )
-            raise HTTPException(status_code=502, detail="远程图片下载失败，请稍后重试") from exc
-        if cached:
-            cached_path, cached_content_type = cached
-            return FileResponse(cached_path, media_type=cached_content_type)
+            raise HTTPException(status_code=502, detail=f"远程文件下载失败：{exc}")
+        content_type = upstream.headers.get("content-type") or "application/octet-stream"
     # Non-image media remains streamed to avoid buffering large videos and files.
     fallback = filename_from_media_url(url, "download.bin")
     filename = sanitize_export_filename(os.path.basename(name) if name else fallback, fallback)
@@ -15155,7 +15982,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         "provider_name": provider.get("name") or provider["id"],
         "task_id": extract_task_id(raw) if isinstance(raw, dict) else None,
         "request_id": raw.get("id") if isinstance(raw, dict) else None,
-        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
+        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": sanitize_history_value(refs)},
         "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
     }
     save_to_history(result)
@@ -15519,7 +16346,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, trust_env=not is_soonstudio_provider(provider)) as client:
+        async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=provider_trust_env(provider)) as client:
             raw = await fetch_image_task_payload(client, task_id, provider, model=payload.model)
     except httpx.HTTPStatusError as exc:
         log_net_error(f"查询生图任务 HTTP状态错误 provider={provider.get('id')} task_id={task_id}", exc)
@@ -15580,6 +16407,16 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         "raw": raw,
     }
 
+async def _notify_canvas_task_ws(task_id: str):
+    with CANVAS_TASK_LOCK:
+        snap = dict(CANVAS_TASKS.get(task_id) or {})
+    if not snap:
+        return
+    try:
+        await manager.broadcast_canvas_task_updated({"task_id": task_id, "task": snap})
+    except Exception:
+        pass
+
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
     with CANVAS_TASK_LOCK:
         if task_id in CANVAS_TASKS:
@@ -15594,6 +16431,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "error": "",
                 "updated_at": time.time(),
             })
+        await _notify_canvas_task_ws(task_id)
     except JimengPendingError as exc:
         # 即梦云端还在排队：标记为 jimeng_pending，前端据 submit_id 持久续查（任务未丢失）
         info = jimeng_pending_payload(exc)
@@ -15608,6 +16446,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "error": "",
                 "updated_at": time.time(),
             })
+        await _notify_canvas_task_ws(task_id)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
@@ -15628,6 +16467,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "upstream_task_id": upstream_task_id,
                 "updated_at": time.time(),
             })
+        await _notify_canvas_task_ws(task_id)
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest, request: Request):
@@ -15678,6 +16518,7 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
                 "error": "",
                 "updated_at": time.time(),
             })
+        await _notify_canvas_task_ws(task_id)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
@@ -15697,6 +16538,7 @@ async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
                 "status_code": status_code,
                 "updated_at": time.time(),
             })
+        await _notify_canvas_task_ws(task_id)
 
 @app.post("/api/canvas-comfy-tasks")
 async def create_canvas_comfy_task(payload: GenerateRequest):
@@ -17107,6 +17949,60 @@ async def canvas_video(payload: CanvasVideoRequest):
 
 # --- Canvas LLM ---
 
+async def _prepare_canvas_llm_upstream_messages(payload: CanvasLLMRequest, model: str) -> List[Dict[str, Any]]:
+    system_prompt = chat_system_prompt(payload)
+    upstream_messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}] if system_prompt else []
+    for item in payload.messages[-MAX_HISTORY_MESSAGES:]:
+        role = item.get("role")
+        content = item.get("content")
+        if role in {"user", "assistant"} and content:
+            upstream_messages.append({"role": role, "content": content})
+    # 去重输入图片与视频，避免多连线节点把同一张参考图重复编码发送两次
+    image_inputs = list(dict.fromkeys(
+        img.strip() for img in (payload.images or [])
+        if isinstance(img, str) and img.strip() and is_image_reference_value(img)
+    ))
+    video_inputs = list(dict.fromkeys(
+        video.strip() for video in (payload.videos or [])
+        if isinstance(video, str) and video.strip() and is_video_reference_value(video)
+    ))
+    if image_inputs or video_inputs:
+        content_parts: List[Dict[str, Any]] = [{"type": "text", "text": payload.message}]
+        encoded_images = await asyncio.to_thread(
+            lambda: [media_reference_to_url(img, max_image_size=1024) for img in image_inputs[:8]]
+        )
+        ok_imgs = 0
+        seen_data_urls = set()
+        for ref_url in encoded_images:
+            if not ref_url or ref_url in seen_data_urls:
+                continue
+            seen_data_urls.add(ref_url)
+            content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
+            ok_imgs += 1
+        ok_videos = 0
+        for video in video_inputs[:3]:
+            frame_urls = await video_reference_to_frame_data_urls(video, max_frames=6, max_size=768)
+            if frame_urls:
+                ok_videos += 1
+                content_parts.append({"type": "text", "text": f"以下是视频 {ok_videos} 按时间顺序抽取的关键帧，请结合这些画面理解视频内容。"})
+                for frame_url in frame_urls:
+                    content_parts.append({"type": "image_url", "image_url": {"url": frame_url}})
+            else:
+                ref_url = await asyncio.to_thread(media_reference_to_url, video)
+                if not ref_url:
+                    continue
+                content_parts.append({"type": "video_url", "video_url": {"url": ref_url}})
+                ok_videos += 1
+        print(f"[canvas-llm] model={model} provider={payload.provider} text_len={len(payload.message)} images={ok_imgs}/{len(payload.images)} videos={ok_videos}/{len(payload.videos)}")
+        if ok_imgs or ok_videos:
+            upstream_messages.append({"role": "user", "content": content_parts})
+        else:
+            upstream_messages.append({"role": "user", "content": payload.message})
+    else:
+        upstream_messages.append({"role": "user", "content": payload.message})
+    return upstream_messages
+
+
 @app.post("/api/canvas-llm")
 async def canvas_llm(payload: CanvasLLMRequest):
     _provider = get_api_provider(payload.provider)
@@ -17121,53 +18017,12 @@ async def canvas_llm(payload: CanvasLLMRequest):
         text, raw = await gemini_cli_chat_text(payload, payload.messages, timeout=CANVAS_LLM_TIMEOUT)
         return {"text": text, "model": model, "raw_usage": None, "raw": raw}
     chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    # 判断协议：APIMart 异步 vs 标准 OpenAI
     _llm_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
     _is_apimart = is_apimart_provider(_llm_provider)
-    system_prompt = chat_system_prompt(payload)
-    upstream_messages = [{"role": "system", "content": system_prompt}] if system_prompt else []
-    for item in payload.messages[-MAX_HISTORY_MESSAGES:]:
-        role = item.get("role")
-        content = item.get("content")
-        if role in {"user", "assistant"} and content:
-            upstream_messages.append({"role": role, "content": content})
-    # 构造用户消息：有图片/视频时用 OpenAI/Gemini 多模态格式
-    image_inputs = [img for img in (payload.images or []) if is_image_reference_value(img)]
-    video_inputs = [video for video in (payload.videos or []) if is_video_reference_value(video)]
-    if image_inputs or video_inputs:
-        content_parts = [{"type": "text", "text": payload.message}]
-        ok_imgs = 0
-        for img in image_inputs[:8]:
-            if not img or not isinstance(img, str):
-                continue
-            ref_url = media_reference_to_url(img, max_image_size=1024)
-            if not ref_url:
-                continue
-            content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
-            ok_imgs += 1
-        ok_videos = 0
-        for video in video_inputs[:3]:
-            if not video or not isinstance(video, str):
-                continue
-            frame_urls = await video_reference_to_frame_data_urls(video, max_frames=6, max_size=768)
-            if frame_urls:
-                ok_videos += 1
-                content_parts.append({"type": "text", "text": f"以下是视频 {ok_videos} 按时间顺序抽取的关键帧，请结合这些画面理解视频内容。"})
-                for frame_url in frame_urls:
-                    content_parts.append({"type": "image_url", "image_url": {"url": frame_url}})
-            else:
-                ref_url = media_reference_to_url(video)
-                if not ref_url:
-                    continue
-                content_parts.append({"type": "video_url", "video_url": {"url": ref_url}})
-                ok_videos += 1
-        print(f"[canvas-llm] model={model} provider={payload.provider} text_len={len(payload.message)} images={ok_imgs}/{len(payload.images)} videos={ok_videos}/{len(payload.videos)}")
-        upstream_messages.append({"role": "user", "content": content_parts})
-    else:
-        upstream_messages.append({"role": "user", "content": payload.message})
+    upstream_messages = await _prepare_canvas_llm_upstream_messages(payload, model)
     raw = None
     try:
-        async with httpx.AsyncClient(timeout=CANVAS_LLM_TIMEOUT) as client:
+        async with shared_async_http_client(timeout=CANVAS_LLM_TIMEOUT, trust_env=provider_trust_env(_llm_provider)) as client:
             req_body = {"model": model, "messages": upstream_messages}
             if _is_apimart:
                 req_body["stream"] = False   # APIMart 默认流式，强制关闭
@@ -17197,6 +18052,91 @@ async def canvas_llm(payload: CanvasLLMRequest):
         raise HTTPException(status_code=502, detail=f"解析回复内容失败：{exc}") from exc
     raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else {}
     return {"text": text, "model": model, "raw_usage": raw_data.get("usage")}
+
+
+@app.post("/api/canvas-llm/stream")
+async def canvas_llm_stream(payload: CanvasLLMRequest):
+    async def stream():
+        try:
+            _provider = get_api_provider(payload.provider)
+            if is_codex_provider(_provider) or is_gemini_cli_provider(_provider):
+                is_codex = is_codex_provider(_provider)
+                defaults = CODEX_DEFAULT_CHAT_MODELS if is_codex else GEMINI_CLI_DEFAULT_CHAT_MODELS
+                model = selected_model(payload.model, (_provider.get("chat_models") or defaults)[0])
+                payload.model = model
+                runner = codex_chat_text if is_codex else gemini_cli_chat_text
+                text, _ = await runner(payload, payload.messages, timeout=CANVAS_LLM_TIMEOUT)
+                clean = str(text or "").strip()
+                if clean:
+                    yield sse_event({"type": "delta", "delta": clean})
+                yield sse_event({"type": "done", "text": clean, "model": model})
+                return
+
+            chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
+            _llm_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
+            _is_apimart = is_apimart_provider(_llm_provider)
+            upstream_messages = await _prepare_canvas_llm_upstream_messages(payload, model)
+            req_body = {"model": model, "messages": upstream_messages, "stream": not _is_apimart}
+            parts: List[str] = []
+            async with shared_async_http_client(timeout=CANVAS_LLM_TIMEOUT, trust_env=provider_trust_env(_llm_provider)) as client:
+                if _is_apimart:
+                    response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body)
+                    if response.status_code >= 400:
+                        body = response.text or ""
+                        friendly = friendly_chat_error_detail(body, model, _llm_provider)
+                        raise HTTPException(status_code=response.status_code, detail=friendly or f"上游接口错误：{body[:1000]}")
+                    raw = response.json()
+                    text = text_from_chat_response(raw).strip()
+                    if text:
+                        parts.append(text)
+                        yield sse_event({"type": "delta", "delta": text})
+                else:
+                    async with client.stream("POST", f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body) as response:
+                        if response.status_code >= 400:
+                            body = (await response.aread()).decode("utf-8", errors="replace")
+                            friendly = friendly_chat_error_detail(body, model, _llm_provider)
+                            raise HTTPException(status_code=response.status_code, detail=friendly or f"上游接口错误：{body[:1000]}")
+                        if "text/event-stream" not in response.headers.get("content-type", "").lower():
+                            raw = json.loads(await response.aread())
+                            text = text_from_chat_response(raw).strip()
+                            if text:
+                                parts.append(text)
+                                yield sse_event({"type": "delta", "delta": text})
+                        else:
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if not data or data == "[DONE]":
+                                    if data == "[DONE]":
+                                        break
+                                    continue
+                                try:
+                                    raw = json.loads(data)
+                                except json.JSONDecodeError:
+                                    continue
+                                error = chat_response_error(raw)
+                                if error:
+                                    raise HTTPException(status_code=502, detail=error)
+                                chunk = unwrap_apimart_response(raw)
+                                if not isinstance(chunk, dict):
+                                    continue
+                                delta = text_delta_from_chat_chunk(chunk)
+                                if delta:
+                                    parts.append(delta)
+                                    yield sse_event({"type": "delta", "delta": delta})
+            final_text = "".join(parts).strip() or "接口返回了空回复。"
+            yield sse_event({"type": "done", "text": final_text, "model": model})
+        except HTTPException as exc:
+            yield sse_event({"type": "error", "detail": exc.detail})
+        except Exception as exc:
+            LOG.exception("canvas_llm_stream_failed")
+            yield sse_event({"type": "error", "detail": f"LLM 请求失败：{exc}"})
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 # --- 对话管理 ---
 
@@ -17709,6 +18649,511 @@ async def export_smart_canvas_group(payload: SmartCanvasGroupExportRequest):
     if count <= 0:
         raise HTTPException(status_code=404, detail="没有可导出的内容")
     return {"ok": True, "folder": target_dir, "count": count}
+
+
+SMART_CANVAS_AGENT_OPEN_TAG = "<agent_plan>"
+SMART_CANVAS_AGENT_CLOSE_TAG = "</agent_plan>"
+SMART_CANVAS_VALID_ASPECTS = {"1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9", "9:21"}
+SMART_CANVAS_NO_GEN_HINTS = (
+    "不要生图", "不生图", "不要出图", "不出图", "仅反推", "只反推", "只要提示词", "只写提示词", "不要创建节点",
+)
+
+
+def build_smart_canvas_agent_system_prompt(payload: SmartCanvasAgentRequest) -> str:
+    base = effective_system_prompt(payload.system_prompt, payload.skill_ids)
+    protocol = (
+        "\n\n# 当前运行环境：智能无限画布（Smart Infinite Canvas）创作 Agent\n"
+        "当前环境已内置并获用户授权使用「画布节点自动连线与新建生图节点」能力。"
+        "用户在句子中内嵌引用的节点（如 `@[节点名]`）以及画布上的关联节点均带有唯一 `node_id`。\n\n"
+        "## 决策与执行规则\n"
+        "1. **何时创建生图节点（`action: \"create_generation_node\"`）**：\n"
+        "   - 当用户提出生图、改图、换背景、替换产品/人物/服装/材质、多图融合、风格迁移、扩图、调光调色、基于生成结果继续微调，或批量衍生画面等明确创作目标时，必须规划生图任务。\n"
+        "   - 当用户只是打招呼、询问角色、要求「仅反推提示词不要生图」、尚未给出修改方向，或关键信息严重缺失必须先提问澄清时，使用 `action: \"chat\"`（`tasks` 为 `[]`）。\n"
+        "2. **自动挑选所需节点与行内「图片 1 / 图片 2」胶囊对齐（极其重要）**：\n"
+        "   - 从提供的候选节点中，精准挑选完成本次目标**真正需要连接**的 `node_id` 放入 `source_node_ids`（纯文生图填 `[]`）。\n"
+        "   - **迭代改图防失真规则**：当用户引用某张「画布已生成结果节点」进行微调（如校正包装颜色、还原字体Logo、微调局部元素），且候选列表中附带了该节点的「上游原始参考源节点」（如最初的高清产品包装图、原场景底图）时，请按需把**当前生成节点 + 关键上游原始参考源节点**一并放入 `source_node_ids`，避免多轮迭代丢细节或偏色！\n"
+        "   - 下游生图节点会严格按 `source_node_ids` 数组顺序依次编号为 `图片 1`、`图片 2`、`图片 3`……并自动在生图节点的提示词框中把 `图片 1`、`图片 2` 渲染成带缩略图的行内引用胶囊！\n"
+        "   - 因此，当 `source_node_ids` 非空时，请在 `prompt` 正文中显式使用 `图片 1`、`图片 2`（与 `source_node_ids[0]`、`source_node_ids[1]` 严格一一对应）来指代各参考图，例如：“保持 图片 1 的立体包型与光影场景，将正面包装图案替换为 图片 2 的设计……”。\n"
+        "3. **简洁回复风格与末尾 `<agent_plan>` 输出格式**：\n"
+        "   - 对话框正文请保持像专业导演助手一样简洁自然（1～4 句话讲清修改方案即可，无需冗长报告；勿声称“已生成完成”）。\n"
+        "   - 为每个新建节点起一个有辨识度的中文短标题 `title`（6～16 字，如 `瑞梦迪4合1浅蓝包装替换`）。\n"
+        "   - 在回复**最末尾**，必须输出且仅输出一个 `<agent_plan>...</agent_plan>` 标签包裹的合法 JSON，标签后不要再输出任何字符：\n"
+        "<agent_plan>\n"
+        "{\n"
+        "  \"action\": \"create_generation_node\",\n"
+        "  \"reply\": \"一句话说明方案\",\n"
+        "  \"tasks\": [\n"
+        "    {\n"
+        "      \"title\": \"有辨识度的短标题\",\n"
+        "      \"source_node_ids\": [\"实际node_id_1\", \"实际node_id_2\"],\n"
+        "      \"prompt\": \"包含 图片 1、图片 2 明确指代、完整独立可用的最终生图提示词（不含代码块标记）\",\n"
+        "      \"aspect_ratio\": \"可选：1:1 / 2:3 / 3:2 / 3:4 / 4:3 / 9:16 / 16:9 / 21:9 或空字符串\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "</agent_plan>\n"
+        "   - 若本次不创建生图节点，末尾输出：\n"
+        "<agent_plan>{\"action\":\"chat\",\"reply\":\"\",\"tasks\":[]}</agent_plan>"
+    )
+    return base + protocol
+
+
+def _clean_agent_task_prompt(raw_prompt: str) -> str:
+    text = str(raw_prompt or "").strip()
+    fence = re.match(r"^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n?```\s*$", text)
+    if fence:
+        text = fence.group(1).strip()
+    return text
+
+
+async def build_smart_canvas_agent_user_message(payload: SmartCanvasAgentRequest):
+    nodes = list(payload.canvas_nodes or [])[:24]
+    has_explicit_focus = any(bool(n.mentioned or n.selected or n.is_upstream_origin) for n in nodes)
+    msg_lower = str(payload.message or "").strip().lower()
+    implicit_visual_hints = (
+        "图1", "图 1", "图2", "图 2", "节点", "这张", "那张", "上面", "画布里", "画布上",
+        "参考", "基于", "改", "换", "替换", "融合", "微调", "反推", "识别", "分析图",
+    )
+    wants_unfocused_vision = has_explicit_focus or any(h in msg_lower for h in implicit_visual_hints)
+    ordered_for_vision = sorted(
+        enumerate(nodes),
+        key=lambda pair: (0 if pair[1].mentioned else (1 if pair[1].selected else (2 if pair[1].is_upstream_origin else 3)), pair[0]),
+    )
+    vision_budget = 8 if has_explicit_focus else (4 if wants_unfocused_vision else 0)
+    allowed_vision_node_ids = set()
+    budget_used = 0
+    for _, node in ordered_for_vision:
+        if has_explicit_focus and not (node.mentioned or node.selected or node.is_upstream_origin):
+            continue
+        imgs = [u for u in (node.image_urls or []) if is_image_reference_value(u)]
+        if imgs and budget_used < vision_budget:
+            allowed_vision_node_ids.add(node.id)
+            budget_used += min(len(imgs), 2)
+
+    content_parts: List[Dict[str, Any]] = []
+    text_summary_lines: List[str] = []
+    has_media_parts = False
+    seen_vision_urls = set()
+
+    if nodes:
+        intro = f"以下是当前智能画布中的 {len(nodes)} 个候选节点（请根据用户目标挑选需要连线的 `node_id`）："
+        content_parts.append({"type": "text", "text": intro})
+        text_summary_lines.append(intro)
+        for idx, node in enumerate(nodes, 1):
+            display_idx = node.index or idx
+            flags = []
+            if node.mentioned:
+                flags.append("用户在输入句中直接引用")
+            if node.is_upstream_origin:
+                flags.append(f"衍生出节点 {node.origin_for_id} 的上游原始参考源节点")
+            if node.selected:
+                flags.append("画布已选中")
+            if node.is_generated:
+                flags.append("画布已生成结果")
+            if not flags:
+                flags.append("画布已有节点")
+            size_label = f" | 尺寸: {node.width}x{node.height}" if node.width > 0 and node.height > 0 else ""
+            header = (
+                f"【画布节点 #{display_idx}（默认称图{display_idx}） | node_id: {node.id} | "
+                f"类型: {node.type} | 标题: {node.title or '未命名'} | 状态: {'/'.join(flags)}{size_label}】"
+            )
+            if node.text:
+                header += f"\n节点文本/提示词内容：{str(node.text).strip()[:1200]}"
+            content_parts.append({"type": "text", "text": header})
+            text_summary_lines.append(header)
+
+            if node.id in allowed_vision_node_ids:
+                raw_node_imgs = [
+                    u.strip() for u in (node.image_urls or [])[:2]
+                    if isinstance(u, str) and u.strip() and is_image_reference_value(u) and u.strip() not in seen_vision_urls
+                ]
+                for u in raw_node_imgs:
+                    seen_vision_urls.add(u)
+                if raw_node_imgs:
+                    encoded_list = await asyncio.to_thread(
+                        lambda urls=raw_node_imgs: [media_reference_to_url(u, max_image_size=1024) for u in urls]
+                    )
+                    for ref_url in encoded_list:
+                        if ref_url:
+                            content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
+                            has_media_parts = True
+            if node.id in allowed_vision_node_ids:
+                for vid_url in (node.video_urls or [])[:1]:
+                    if not is_video_reference_value(vid_url):
+                        continue
+                    frame_urls = await video_reference_to_frame_data_urls(vid_url, max_frames=4, max_size=768)
+                    if frame_urls:
+                        content_parts.append({"type": "text", "text": f"节点 {node.id} 的视频关键帧："})
+                        for frame_url in frame_urls:
+                            content_parts.append({"type": "image_url", "image_url": {"url": frame_url}})
+                            has_media_parts = True
+    else:
+        empty_note = "当前画布暂无已上传的参考节点（若用户需要文生图，可直接规划 `source_node_ids: []` 的新建生图节点）。"
+        content_parts.append({"type": "text", "text": empty_note})
+        text_summary_lines.append(empty_note)
+
+    goal_block = f"\n用户的当前指令：\n{payload.message.strip()}\n\n请按系统提示词分析，并在回复最末尾附上 `<agent_plan>...</agent_plan>`。"
+    content_parts.append({"type": "text", "text": goal_block})
+    text_summary_lines.append(goal_block)
+
+    plain_text = "\n\n".join(text_summary_lines)
+    return (content_parts if has_media_parts else plain_text), plain_text
+
+
+def parse_smart_canvas_agent_plan(full_text: str, payload: SmartCanvasAgentRequest) -> Tuple[str, Dict[str, Any]]:
+    raw = str(full_text or "")
+    valid_ids = {n.id for n in (payload.canvas_nodes or []) if n.id}
+    index_to_id = {}
+    for idx, n in enumerate(payload.canvas_nodes or [], 1):
+        index_to_id[n.index or idx] = n.id
+        index_to_id[idx] = n.id
+
+    visible_text = raw
+    plan_json_str = ""
+    tag_match = re.search(r"<agent_plan>\s*([\s\S]*?)\s*(?:</agent_plan>|$)", raw, re.IGNORECASE)
+    if tag_match:
+        visible_text = (raw[:tag_match.start()] + raw[tag_match.end():]).strip()
+        plan_json_str = tag_match.group(1).strip()
+
+    parsed_obj = None
+    if plan_json_str:
+        clean_candidate = _clean_agent_task_prompt(plan_json_str)
+        brace_match = re.search(r"\{[\s\S]*\}", clean_candidate)
+        if brace_match:
+            try:
+                parsed_obj = json.loads(brace_match.group(0))
+            except Exception:
+                parsed_obj = None
+
+    def normalize_source_ids(raw_ids, prompt_text=""):
+        out = []
+        for item in (raw_ids or []):
+            sid = str(item or "").strip()
+            if not sid:
+                continue
+            if sid in valid_ids and sid not in out:
+                out.append(sid)
+                continue
+            base_matches = [vid for vid in valid_ids if vid.split("#", 1)[0] == sid]
+            if len(base_matches) == 1 and base_matches[0] not in out:
+                out.append(base_matches[0])
+                continue
+            num_match = re.match(r"^(?:#|图|节点\s*)?(\d+)$", sid)
+            if num_match:
+                mapped = index_to_id.get(int(num_match.group(1)))
+                if mapped and mapped in valid_ids and mapped not in out:
+                    out.append(mapped)
+        if not out and prompt_text and valid_ids:
+            mentioned_nums = [int(m) for m in re.findall(r"图\s*([1-9]\d?)", prompt_text)]
+            for num in mentioned_nums:
+                mapped = index_to_id.get(num)
+                if mapped and mapped in valid_ids and mapped not in out:
+                    out.append(mapped)
+        return out
+
+    if isinstance(parsed_obj, dict):
+        action = str(parsed_obj.get("action") or "").strip()
+        reply = str(parsed_obj.get("reply") or "").strip()
+        raw_tasks = parsed_obj.get("tasks")
+        if not isinstance(raw_tasks, list):
+            if parsed_obj.get("prompt"):
+                raw_tasks = [parsed_obj]
+            else:
+                raw_tasks = []
+        tasks = []
+        for t in raw_tasks[:4]:
+            if not isinstance(t, dict):
+                continue
+            prompt_val = _clean_agent_task_prompt(t.get("prompt") or "")
+            if not prompt_val:
+                continue
+            src_ids = normalize_source_ids(t.get("source_node_ids") or t.get("node_ids") or [], prompt_val)
+            aspect = str(t.get("aspect_ratio") or "").strip()
+            if aspect not in SMART_CANVAS_VALID_ASPECTS:
+                aspect = ""
+            tasks.append({
+                "title": str(t.get("title") or "").strip()[:60],
+                "source_node_ids": src_ids,
+                "prompt": prompt_val,
+                "aspect_ratio": aspect,
+            })
+        if action == "create_generation_node" and tasks:
+            return visible_text, {"action": "create_generation_node", "reply": reply, "tasks": tasks}
+        return visible_text, {"action": "chat", "reply": reply, "tasks": []}
+
+    # Fallback: if model forgot <agent_plan> but emitted 【最终可用提示词】 fenced block and user wanted generation
+    user_msg = str(payload.message or "").strip()
+    no_gen = any(h in user_msg for h in SMART_CANVAS_NO_GEN_HINTS)
+    wants_gen = not no_gen and any(
+        k in user_msg.lower()
+        for k in [*AGENT_IMAGE_KEYWORDS, *AGENT_EDIT_KEYWORDS, "替换", "融合", "背景", "材质", "生图", "改"]
+    )
+    if wants_gen:
+        section_match = re.search(r"【最终可用提示词】[\s\S]*?```[a-zA-Z0-9_-]*\s*\n([\s\S]+?)\n?```", visible_text)
+        if section_match:
+            extracted_prompt = section_match.group(1).strip()
+            priority_ids = [n.id for n in (payload.canvas_nodes or []) if (n.mentioned or n.selected) and n.id in valid_ids]
+            inferred_ids = normalize_source_ids(priority_ids, extracted_prompt)
+            if not inferred_ids and len(payload.canvas_nodes or []) == 1:
+                inferred_ids = [payload.canvas_nodes[0].id]
+            return visible_text, {
+                "action": "create_generation_node",
+                "reply": "已根据分析结果提取最终生图提示词并创建画布生图节点。",
+                "tasks": [{
+                    "title": "",
+                    "source_node_ids": inferred_ids,
+                    "prompt": extracted_prompt,
+                    "aspect_ratio": "",
+                }],
+            }
+
+    return visible_text, {"action": "chat", "reply": "", "tasks": []}
+
+
+class _AgentTagStreamFilter:
+    """Streams text before `<agent_plan>` immediately while holding back partial tag prefixes."""
+
+    def __init__(self, open_tag: str = SMART_CANVAS_AGENT_OPEN_TAG):
+        self.open_tag = open_tag
+        self.open_lower = open_tag.lower()
+        self.buffer = ""
+        self.in_plan = False
+
+    def push(self, chunk: str) -> Tuple[str, bool]:
+        if not chunk or self.in_plan:
+            return "", self.in_plan
+        self.buffer += chunk
+        lower_buf = self.buffer.lower()
+        idx = lower_buf.find(self.open_lower)
+        if idx != -1:
+            emit = self.buffer[:idx]
+            self.buffer = ""
+            self.in_plan = True
+            return emit, True
+        # Hold back any suffix that could be the beginning of `<agent_plan>`
+        hold = 0
+        max_check = min(len(self.buffer), len(self.open_lower) - 1)
+        for k in range(max_check, 0, -1):
+            if self.open_lower.startswith(lower_buf[-k:]):
+                hold = k
+                break
+        if hold > 0:
+            emit = self.buffer[:-hold]
+            self.buffer = self.buffer[-hold:]
+            return emit, False
+        emit = self.buffer
+        self.buffer = ""
+        return emit, False
+
+    def flush(self) -> str:
+        if self.in_plan or not self.buffer:
+            self.buffer = ""
+            return ""
+        out = self.buffer
+        self.buffer = ""
+        return out
+
+
+async def iter_smart_canvas_agent_reply(payload: SmartCanvasAgentRequest):
+    node_count = len(payload.canvas_nodes or [])
+    yield {
+        "type": "status",
+        "stage": "perceive",
+        "message": f"正在感知画布 {node_count} 个节点并理解创作目标…" if node_count else "正在理解创作目标…",
+    }
+    system_prompt = build_smart_canvas_agent_system_prompt(payload)
+    user_content, plain_user_text = await build_smart_canvas_agent_user_message(payload)
+
+    provider_cfg = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
+    is_codex = is_codex_provider(provider_cfg)
+    is_gemini_cli = is_gemini_cli_provider(provider_cfg)
+
+    if is_codex or is_gemini_cli:
+        defaults = CODEX_DEFAULT_CHAT_MODELS if is_codex else GEMINI_CLI_DEFAULT_CHAT_MODELS
+        model = selected_model(payload.model, (provider_cfg.get("chat_models") or defaults)[0])
+        cli_payload = SimpleNamespace(
+            message=plain_user_text,
+            system_prompt=system_prompt,
+            skill_ids=[],
+            model=model,
+            reasoning_effort=payload.reasoning_effort,
+        )
+        label = "OpenAI CLI" if is_codex else gemini_cli_display_name()
+        yield {"type": "status", "stage": "cli", "message": f"正在等待 {label} 分析画布与生成方案…"}
+        runner = codex_chat_text if is_codex else gemini_cli_chat_text
+        hist = [
+            {"role": m.get("role"), "content": str(m.get("content") or "")}
+            for m in (payload.history or [])[-12:]
+            if isinstance(m, dict) and m.get("role") in {"user", "assistant"} and m.get("content")
+        ]
+        full_text, _ = await runner(cli_payload, hist, timeout=CANVAS_LLM_TIMEOUT)
+        visible_text, plan = parse_smart_canvas_agent_plan(full_text, payload)
+        if visible_text:
+            yield {"type": "delta", "delta": visible_text}
+        yield {"type": "plan", "plan": plan}
+        yield {"type": "done", "text": visible_text, "model": model, "plan": plan, "reasoning": ""}
+        return
+
+    chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
+    _is_apimart = is_apimart_provider(provider_cfg)
+
+    upstream_messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for item in (payload.history or [])[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            upstream_messages.append({"role": role, "content": content[:4000]})
+    upstream_messages.append({"role": "user", "content": user_content})
+
+    req_body = {
+        "model": model,
+        "messages": upstream_messages,
+        "stream": not _is_apimart,
+        **chat_reasoning_options(payload, model),
+    }
+
+    full_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    tag_filter = _AgentTagStreamFilter()
+    announced_planning = False
+
+    yield {"type": "status", "stage": "thinking", "message": "Agent 正在结合系统提示词分析节点…"}
+    try:
+        async with shared_async_http_client(timeout=CANVAS_LLM_TIMEOUT, trust_env=provider_trust_env(provider_cfg)) as client:
+            if _is_apimart:
+                response = await client.post(f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body)
+                if response.status_code >= 400:
+                    body = response.text or ""
+                    friendly = friendly_chat_error_detail(body, model, provider_cfg)
+                    raise HTTPException(status_code=response.status_code, detail=friendly or f"上游接口错误：{body[:1000]}")
+                raw = response.json()
+                error = chat_response_error(raw)
+                if error:
+                    raise HTTPException(status_code=502, detail=error)
+                reasoning = reasoning_from_chat_response(raw)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    yield {"type": "reasoning", "delta": reasoning}
+                text = text_from_chat_response(raw)
+                if text:
+                    full_parts.append(text)
+                    emit, entered_plan = tag_filter.push(text)
+                    if emit:
+                        yield {"type": "delta", "delta": emit}
+                    if not entered_plan:
+                        tail = tag_filter.flush()
+                        if tail:
+                            yield {"type": "delta", "delta": tail}
+            else:
+                async with client.stream("POST", f"{chat_base}/chat/completions", headers=chat_hdrs, json=req_body) as response:
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        friendly = friendly_chat_error_detail(body, model, provider_cfg)
+                        raise HTTPException(status_code=response.status_code, detail=friendly or f"上游接口错误：{body[:1000]}")
+                    if "text/event-stream" not in response.headers.get("content-type", "").lower():
+                        raw = json.loads(await response.aread())
+                        error = chat_response_error(raw)
+                        if error:
+                            raise HTTPException(status_code=502, detail=error)
+                        reasoning = reasoning_from_chat_response(raw)
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+                            yield {"type": "reasoning", "delta": reasoning}
+                        text = text_from_chat_response(raw)
+                        if text:
+                            full_parts.append(text)
+                            emit, entered_plan = tag_filter.push(text)
+                            if emit:
+                                yield {"type": "delta", "delta": emit}
+                            if not entered_plan:
+                                tail = tag_filter.flush()
+                                if tail:
+                                    yield {"type": "delta", "delta": tail}
+                    else:
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            if not data:
+                                continue
+                            try:
+                                raw = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            error = chat_response_error(raw)
+                            if error:
+                                raise HTTPException(status_code=502, detail=error)
+                            chunk = unwrap_apimart_response(raw)
+                            if not isinstance(chunk, dict):
+                                continue
+                            reasoning = reasoning_from_chat_response(chunk, streaming=True)
+                            if reasoning:
+                                reasoning_parts.append(reasoning)
+                                yield {"type": "reasoning", "delta": reasoning}
+                            delta = text_delta_from_chat_chunk(chunk)
+                            if delta:
+                                full_parts.append(delta)
+                                emit, entered_plan = tag_filter.push(delta)
+                                if emit:
+                                    yield {"type": "delta", "delta": emit}
+                                if entered_plan and not announced_planning:
+                                    announced_planning = True
+                                    yield {"type": "status", "stage": "planning", "message": "正在生成画布连线与生图节点配置…"}
+                        tail = tag_filter.flush()
+                        if tail:
+                            yield {"type": "delta", "delta": tail}
+    except httpx.HTTPError as exc:
+        log_net_error("智能画布 Agent 网络/TLS错误", exc)
+        raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
+
+    full_raw_text = "".join(full_parts).strip()
+    if not full_raw_text:
+        raise HTTPException(status_code=502, detail="模型返回了空回复，请检查当前对话模型是否可用。")
+    visible_text, plan = parse_smart_canvas_agent_plan(full_raw_text, payload)
+    if not visible_text and plan.get("reply"):
+        visible_text = plan["reply"]
+        yield {"type": "delta", "delta": visible_text}
+    yield {"type": "plan", "plan": plan}
+    yield {
+        "type": "done",
+        "text": visible_text,
+        "model": model,
+        "plan": plan,
+        "reasoning": "".join(reasoning_parts).strip(),
+    }
+
+
+@app.post("/api/smart-canvas/agent")
+async def smart_canvas_agent(payload: SmartCanvasAgentRequest):
+    done_event = None
+    async for event in iter_smart_canvas_agent_reply(payload):
+        if event.get("type") == "done":
+            done_event = event
+    if not done_event:
+        raise HTTPException(status_code=502, detail="Agent 未返回有效结果。")
+    return done_event
+
+
+@app.post("/api/smart-canvas/agent/stream")
+async def smart_canvas_agent_stream(payload: SmartCanvasAgentRequest):
+    async def stream():
+        try:
+            async for event in iter_smart_canvas_agent_reply(payload):
+                yield sse_event(event)
+        except HTTPException as exc:
+            yield sse_event({"type": "error", "detail": exc.detail})
+        except Exception as exc:
+            LOG.exception("smart_canvas_agent_stream_failed")
+            yield sse_event({"type": "error", "detail": f"创作 Agent 处理失败：{exc}"})
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 @app.get("/api/asset-library")
 async def get_asset_library():
@@ -18466,9 +19911,66 @@ async def batch_crop_asset_library_items(payload: AssetLibraryBatchCropRequest):
     save_asset_library(lib)
     return {"library": lib, "added": len(added), "items": added}
 
+def migrate_cached_remote_canvas_urls():
+    """将画布存档中已有本地 remote-images 缓存的远程临时 URL（如 soonstudio 签名链接）
+    无损转化为永久本地 /assets/output/canvas_remote_*.<ext> 资源，防止签名过期与重复跨国下载。"""
+    if not os.path.isdir(CANVAS_DIR):
+        return 0
+    localized_count = 0
+    for entry in os.scandir(CANVAS_DIR):
+        if not entry.is_file() or not entry.name.endswith(".json"):
+            continue
+        try:
+            with open(entry.path, "r", encoding="utf-8") as f:
+                canvas = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(canvas, dict):
+            continue
+        changed = False
+        for node in canvas.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            images = node.get("images")
+            if not isinstance(images, list):
+                continue
+            for idx, img in enumerate(images):
+                raw_url = img.get("url") if isinstance(img, dict) else (img if isinstance(img, str) else "")
+                if not isinstance(raw_url, str) or not raw_url.startswith(("http://", "https://")):
+                    continue
+                _root, _key, cached_path = remote_image_cache_location(raw_url)
+                if not cached_path:
+                    continue
+                try:
+                    local_url, width, height = copy_remote_canvas_image_to_output(raw_url, cached_path)
+                except Exception:
+                    continue
+                if isinstance(img, dict):
+                    img["url"] = local_url
+                    if width > 0 and height > 0:
+                        img.setdefault("natural_w", width)
+                        img.setdefault("natural_h", height)
+                else:
+                    images[idx] = local_url
+                changed = True
+                localized_count += 1
+        if changed:
+            try:
+                with CANVAS_LOCK:
+                    tmp = f"{entry.path}.{uuid.uuid4().hex[:8]}.tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(canvas, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp, entry.path)
+            except Exception as exc:
+                LOG.warning("migrate_cached_remote_canvas_urls_save_failed file=%s error=%s", entry.name, exc)
+    if localized_count:
+        LOG.info("migrated_cached_remote_canvas_urls count=%d", localized_count)
+    return localized_count
+
+
 @app.put("/api/canvases/{canvas_id}")
-async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
-    canvas = load_canvas(canvas_id)
+async def update_canvas(canvas_id: str, payload: CanvasSaveRequest, compact: int = 0):
+    canvas = await asyncio.to_thread(load_canvas, canvas_id)
     current_updated_at = int(canvas.get("updated_at") or 0)
     if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
         raise HTTPException(status_code=409, detail={
@@ -18487,8 +19989,11 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
         canvas["viewport"] = canvas.get("viewport") or {"x": 0, "y": 0, "scale": 1}
     canvas["logs"] = payload.logs[-500:]
     canvas["settings"] = payload.settings or {}
-    save_canvas(canvas)
-    await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), payload.client_id)
+    await asyncio.to_thread(save_canvas, canvas)
+    updated_at = int(canvas.get("updated_at") or now_ms())
+    await manager.broadcast_canvas_updated(canvas_id, updated_at, payload.client_id)
+    if compact:
+        return {"canvas": {"id": canvas.get("id") or canvas_id, "updated_at": updated_at}}
     return {"canvas": canvas}
 
 @app.delete("/api/canvases/{canvas_id}")
@@ -18677,6 +20182,7 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             "created_at": now_ms(),
             "model": model,
             "size": image_size,
+            "used_references": image_refs,
             "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
         }
     else:
@@ -18719,14 +20225,11 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
         _conv_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
         _conv_is_apimart = is_apimart_provider(_conv_provider)
         history = conversation["messages"][-MAX_HISTORY_MESSAGES:]
-        upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
-        for item in history:
-            msg = upstream_message_from_record(item)
-            if msg:
-                upstream_messages.append(msg)
+        history_msgs = await asyncio.to_thread(build_chat_history_messages, history, 4, 1280)
+        upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}, *history_msgs]
         try:
-            async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-                conv_req_body = {"model": model, "messages": upstream_messages}
+            async with shared_async_http_client(timeout=AI_REQUEST_TIMEOUT, trust_env=provider_trust_env(_conv_provider)) as client:
+                conv_req_body = {"model": model, "messages": upstream_messages, **chat_reasoning_options(payload, model)}
                 if _conv_is_apimart:
                     conv_req_body["stream"] = False
                 response = await client.post(
@@ -18742,15 +20245,24 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             raise HTTPException(status_code=exc.response.status_code, detail=friendly or f"上游接口错误：{body}") from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
+        error = chat_response_error(raw)
+        if error:
+            raise HTTPException(status_code=502, detail=error)
         raw_data = unwrap_apimart_response(raw) if isinstance(raw, dict) else raw
+        text = text_from_chat_response(raw).strip() if isinstance(raw_data, dict) else ""
+        if not text:
+            raise HTTPException(status_code=502, detail="接口返回了空回复。")
         assistant_message = {
             "id": uuid.uuid4().hex,
             "role": "assistant",
-            "content": text_from_chat_response(raw).strip() or "接口返回了空回复。",
+            "content": text,
             "created_at": now_ms(),
             "model": model,
             "raw_usage": raw_data.get("usage") if isinstance(raw_data, dict) else None,
         }
+        reasoning = reasoning_from_chat_response(raw)
+        if reasoning:
+            assistant_message["reasoning"] = reasoning
 
     conversation["messages"].append(assistant_message)
     conversation["updated_at"] = now_ms()
@@ -18782,75 +20294,21 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
     conversation["updated_at"] = now_ms()
     save_conversation(user_id, conversation)
 
-    decision = await decide_chat_agent_action(payload, conversation, image_refs)
-    action = decision.get("action") or "chat"
-    tool_refs = image_refs[:]
-    inherited_size = ""
-    if action == "edit_image" and not tool_refs:
-        tool_refs = latest_chat_image_refs(conversation, 1)
-        inherited_size = image_size_from_reference(tool_refs[0]) if tool_refs else ""
-    if action == "edit_image" and not tool_refs:
-        action = "generate_image"
-
-    if action in {"generate_image", "edit_image"}:
-        image_provider = pick_chat_image_provider(payload.image_provider or payload.provider, payload.provider)
-        default_model = (image_provider.get("image_models") or [IMAGE_MODEL])[0]
-        model = selected_model(payload.image_model or default_model, default_model)
-        prompt = decision.get("prompt") or payload.message
-        prompt_size = chat_prompt_size_override(payload.message, payload.size) or chat_prompt_size_override(prompt, payload.size)
-        image_size = snap_size_to_multiple(prompt_size or inherited_size or payload.size, 16)
-        requested_count = 1 if action == "edit_image" else chat_requested_image_count(payload.message)
-        prompts = chat_split_parallel_prompts(prompt, requested_count)
-        local_urls = []
-        raw_items = []
-        try:
-            for item_prompt in prompts:
-                image_data, raw = await generate_ai_image(
-                    item_prompt,
-                    image_size,
-                    payload.quality,
-                    model,
-                    tool_refs,
-                    image_provider["id"],
-                    payload.aspect_ratio,
-                    payload.resolution,
-                )
-                local_urls.append(await save_ai_image_to_output(image_data, prefix="chat_"))
-                raw_items.append(raw)
-        except httpx.HTTPStatusError as exc:
-            text = exc.response.text or ""
-            detail = friendly_image_error_detail(text, image_size, model) or f"上游生图接口错误：{text[:300]}"
-            raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
-        except httpx.HTTPError as exc:
-            log_net_error(f"对话生图 网络/TLS错误 model={model}", exc)
-            raise HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}") from exc
-        local_url = local_urls[0] if local_urls else ""
-        assistant_message = {
-            "id": uuid.uuid4().hex,
-            "role": "assistant",
-            "type": "image",
-            "content": prompt,
-            "image_url": local_url,
-            "image_urls": local_urls,
-            "created_at": now_ms(),
-            "model": model,
-            "provider": image_provider["id"],
-            "size": image_size,
-            "image_count": len(local_urls),
-            "prompts": prompts,
-            "agent_action": action,
-            "agent_reply": decision.get("reply") or "",
-            "used_references": tool_refs,
-            "raw_usage": raw_items[0].get("usage") if raw_items and isinstance(raw_items[0], dict) else None,
-        }
-    else:
-        assistant_message = await build_chat_text_reply(payload, conversation)
-        assistant_message["agent_action"] = "chat"
-
+    result = None
+    async for event in iter_chat_agent_reply(payload, conversation, image_refs):
+        if event["type"] == "partial":
+            conversation["messages"].append(event["message"])
+            conversation["updated_at"] = now_ms()
+            save_conversation(user_id, conversation)
+        if event["type"] == "message":
+            result = event
+    if result is None:
+        raise HTTPException(status_code=502, detail="Agent 未返回处理结果。")
+    assistant_message = result["message"]
     conversation["messages"].append(assistant_message)
     conversation["updated_at"] = now_ms()
     save_conversation(user_id, conversation)
-    return {"conversation": conversation, "message": assistant_message, "agent": {"action": action, "decision": decision}}
+    return {"conversation": conversation, "message": assistant_message, "agent": result["agent"]}
 
 @app.post("/api/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
@@ -18879,151 +20337,69 @@ async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = H
     conversation["updated_at"] = now_ms()
     save_conversation(user_id, conversation)
 
-    _codex_provider = get_api_provider(payload.provider)
-    if is_codex_provider(_codex_provider):
-        model = selected_model(payload.model, (_codex_provider.get("chat_models") or CODEX_DEFAULT_CHAT_MODELS)[0])
-        payload.model = model
-
-        async def codex_stream():
-            yield sse_event({"type": "meta", "conversation": conversation})
-            try:
-                text, raw = await codex_chat_text(payload, conversation["messages"][-MAX_HISTORY_MESSAGES:])
-            except HTTPException as exc:
-                yield sse_event({"type": "error", "detail": exc.detail})
-                return
-            assistant_message = {
-                "id": uuid.uuid4().hex,
-                "role": "assistant",
-                "content": text,
-                "created_at": now_ms(),
-                "model": model,
-                "raw_usage": None,
-                "raw": raw,
-            }
-            conversation["messages"].append(assistant_message)
-            conversation["updated_at"] = now_ms()
-            save_conversation(user_id, conversation)
-            yield sse_event({"type": "delta", "delta": text})
-            yield sse_event({"type": "done", "conversation": conversation, "message": assistant_message})
-
-        return StreamingResponse(codex_stream(), media_type="text/event-stream")
-
-    if is_gemini_cli_provider(_codex_provider):
-        model = selected_model(payload.model, (_codex_provider.get("chat_models") or GEMINI_CLI_DEFAULT_CHAT_MODELS)[0])
-        payload.model = model
-
-        async def gemini_cli_stream():
-            yield sse_event({"type": "meta", "conversation": conversation})
-            try:
-                text, raw = await gemini_cli_chat_text(payload, conversation["messages"][-MAX_HISTORY_MESSAGES:])
-            except HTTPException as exc:
-                yield sse_event({"type": "error", "detail": exc.detail})
-                return
-            assistant_message = {
-                "id": uuid.uuid4().hex,
-                "role": "assistant",
-                "content": text,
-                "created_at": now_ms(),
-                "model": model,
-                "raw_usage": None,
-                "raw": raw,
-            }
-            conversation["messages"].append(assistant_message)
-            conversation["updated_at"] = now_ms()
-            save_conversation(user_id, conversation)
-            yield sse_event({"type": "delta", "delta": text})
-            yield sse_event({"type": "done", "conversation": conversation, "message": assistant_message})
-
-        return StreamingResponse(gemini_cli_stream(), media_type="text/event-stream")
-
-    chat_base, chat_hdrs, model = resolve_chat_provider(payload.provider, payload.model, payload.ms_model)
-    _stream_provider = get_api_provider(payload.provider) if payload.provider not in ("modelscope",) else {}
-    history = conversation["messages"][-MAX_HISTORY_MESSAGES:]
-    upstream_messages = [{"role": "system", "content": chat_system_prompt(payload)}]
-    for item in history:
-        msg = upstream_message_from_record(item)
-        if msg:
-            upstream_messages.append(msg)
-
     async def stream():
-        content_parts = []
-        raw_usage = None
         yield sse_event({"type": "meta", "conversation": conversation})
         try:
-            async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-                async with client.stream(
-                    "POST",
-                    f"{chat_base}/chat/completions",
-                    headers=chat_hdrs,
-                    json={"model": model, "messages": upstream_messages, "stream": True},
-                ) as response:
-                    if response.status_code >= 400:
-                        detail = await response.aread()
-                        body = detail.decode("utf-8", errors="ignore")
-                        friendly = friendly_chat_error_detail(body, model, _stream_provider)
-                        yield sse_event({"type": "error", "detail": friendly or f"上游接口错误：{body}"})
-                        return
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data:"):
-                            line = line[5:].strip()
-                        if line == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(chunk, dict) and chunk.get("usage"):
-                            raw_usage = chunk.get("usage")
-                        delta = text_delta_from_chat_chunk(chunk)
-                        if delta:
-                            content_parts.append(delta)
-                            yield sse_event({"type": "delta", "delta": delta})
-        except httpx.HTTPError as exc:
-            log_net_error("对话(流式) 网络/TLS错误", exc)
-            yield sse_event({"type": "error", "detail": f"请求上游接口失败：{exc}"})
-            return
+            events = (
+                iter_chat_agent_reply(payload, conversation, image_references(refs))
+                if payload.mode == "agent"
+                else iter_chat_text_reply(payload, conversation)
+            )
+            async for event in events:
+                if event["type"] not in {"message", "partial"}:
+                    yield sse_event(event)
+                    continue
+                assistant_message = event["message"]
+                conversation["messages"].append(assistant_message)
+                conversation["updated_at"] = now_ms()
+                save_conversation(user_id, conversation)
+                done = {
+                    "type": "partial" if event["type"] == "partial" else "done",
+                    "conversation": conversation,
+                    "message": assistant_message,
+                }
+                if event.get("agent"):
+                    done["agent"] = event["agent"]
+                yield sse_event(done)
+        except HTTPException as exc:
+            yield sse_event({"type": "error", "detail": exc.detail})
+        except Exception:
+            LOG.exception("chat_stream_failed")
+            yield sse_event({"type": "error", "detail": "对话处理失败，请查看服务日志。"})
 
-        assistant_message = {
-            "id": uuid.uuid4().hex,
-            "role": "assistant",
-            "content": "".join(content_parts).strip() or "接口返回了空回复。",
-            "created_at": now_ms(),
-            "model": model,
-            "raw_usage": raw_usage,
-        }
-        conversation["messages"].append(assistant_message)
-        conversation["updated_at"] = now_ms()
-        save_conversation(user_id, conversation)
-        yield sse_event({"type": "done", "conversation": conversation, "message": assistant_message})
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 # --- 历史记录 ---
 
 @app.get("/api/history")
-async def get_history_api(type: str = None):
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if type:
-                    data = [item for item in data if item.get("type", "zimage") == type]
-                data = [item for item in data if item.get("images") and len(item["images"]) > 0]
+async def get_history_api(type: str = None, offset: int = 0, limit: int = 0):
+    def _load_filtered():
+        with HISTORY_LOCK:
+            data = list(_read_history_unlocked(HISTORY_FILE))
+        if type:
+            data = [item for item in data if isinstance(item, dict) and item.get("type", "zimage") == type]
+        data = [item for item in data if isinstance(item, dict) and item.get("images") and len(item["images"]) > 0]
 
-                def sort_key(item):
-                    ts = item.get("timestamp", 0)
-                    if isinstance(ts, (int, float)):
-                        return float(ts)
-                    return 0
+        def sort_key(item):
+            ts = item.get("timestamp", 0)
+            if isinstance(ts, (int, float)):
+                return float(ts)
+            return 0
 
-                data.sort(key=sort_key, reverse=True)
-                return data
-        except Exception as e:
-            print(f"读取历史文件失败: {e}")
-            return []
-    return []
+        data.sort(key=sort_key, reverse=True)
+        start = max(0, int(offset or 0))
+        if int(limit or 0) > 0:
+            return data[start:start + min(2000, int(limit))]
+        return data[start:] if start else data
+
+    try:
+        return await asyncio.to_thread(_load_filtered)
+    except Exception as e:
+        print(f"读取历史文件失败: {e}")
+        return []
 
 @app.get("/api/queue_status")
 async def get_queue_status(client_id: str):
@@ -19037,10 +20413,10 @@ async def get_queue_status(client_id: str):
 async def delete_history(req: DeleteHistoryRequest):
     if not os.path.exists(HISTORY_FILE):
         return {"success": False, "message": "History file not found"}
-    try:
+
+    def _remove():
         with HISTORY_LOCK:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                history = json.load(f)
+            history = list(_read_history_unlocked(HISTORY_FILE))
             target_record = None
             new_history = []
             for item in history:
@@ -19056,9 +20432,13 @@ async def delete_history(req: DeleteHistoryRequest):
                 else:
                     new_history.append(item)
             if target_record:
-                with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(new_history, f, ensure_ascii=False, indent=4)
+                _HISTORY_MEM_CACHE["path"] = HISTORY_FILE
+                _HISTORY_MEM_CACHE["items"] = new_history
+                _write_history_file_atomic(HISTORY_FILE, new_history)
+            return target_record
 
+    try:
+        target_record = await asyncio.to_thread(_remove)
         if target_record:
             for img_url in target_record.get("images", []):
                 file_path = output_file_from_url(img_url)
@@ -19068,8 +20448,7 @@ async def delete_history(req: DeleteHistoryRequest):
                     except Exception as e:
                         print(f"Failed to delete file {file_path}: {e}")
             return {"success": True}
-        else:
-            return {"success": False, "message": "Record not found"}
+        return {"success": False, "message": "Record not found"}
     except Exception as e:
         print(f"Delete history error: {e}")
         return {"success": False, "message": str(e)}

@@ -942,19 +942,18 @@ function currentWorkflowItems(){
 }
 function canvasAssetCategories(){
     const cats = Array.isArray(canvasAssetsData.categories) && canvasAssetsData.categories.length
-        ? canvasAssetsData.categories.filter(cat => ['smart','classic'].includes(cat.id))
-        : [
-            {id:'smart', name:'智能画布', count:(canvasAssetsData.items || []).filter(item => item.canvas_kind === 'smart').length, canvas_count:(canvasAssetsData.canvases || []).filter(item => item.kind === 'smart').length},
-            {id:'classic', name:'普通画布', count:(canvasAssetsData.items || []).filter(item => item.canvas_kind !== 'smart').length, canvas_count:(canvasAssetsData.canvases || []).filter(item => item.kind !== 'smart').length}
-        ];
-    return cats;
+        ? canvasAssetsData.categories.filter(cat => cat.id === 'smart')
+        : [];
+    if(cats.length) return cats;
+    return [
+        {id:'smart', name:'智能画布', count:(canvasAssetsData.items || []).length, canvas_count:(canvasAssetsData.canvases || []).length}
+    ];
 }
 function activeCanvasAssetCategoryInfo(){
     return canvasAssetCategories().find(cat => cat.id === activeCanvasAssetCategory) || canvasAssetCategories()[0] || {id:'smart', name:'智能画布', count:0, canvas_count:0};
 }
 function defaultCanvasAssetCategory(){
-    const cats = canvasAssetCategories();
-    return cats.find(cat => Number(cat.canvas_count || 0) > 0)?.id || cats[0]?.id || 'smart';
+    return 'smart';
 }
 function uniqueCanvasAssets(items){
     const seen = new Set();
@@ -972,13 +971,12 @@ function canvasAssetCountForCanvas(canvasId){
 }
 function canvasAssetsForCategory(categoryId=activeCanvasAssetCategory){
     let list = Array.isArray(canvasAssetsData.canvases) ? canvasAssetsData.canvases.slice() : [];
-    list = list.filter(canvas => (canvas.kind || 'classic') === categoryId);
     return list.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'zh-Hans-CN', {numeric:true, sensitivity:'base'}));
 }
 function canvasAssetOpenUrl(canvas){
     if(!canvas?.id) return '';
     const id = encodeURIComponent(canvas.id);
-    return canvas.kind === 'smart' ? `/static/smart-canvas.html?id=${id}` : `/static/canvas.html?id=${id}`;
+    return `/static/smart-canvas.html?id=${id}&v=2026.11.21.7`;
 }
 function activeCanvasAssetCanvas(){
     if(!activeCanvasAssetCanvasId) return null;
@@ -1001,7 +999,7 @@ function canvasAssetKindLabel(item){
     return '图片';
 }
 function canvasKindLabel(kind){
-    return kind === 'smart' ? '智能画布' : '普通画布';
+    return '智能画布';
 }
 function canvasAssetSortLabel(){
     const map = {canvas_asc:'画布名称', updated_desc:'最近更新', updated_asc:'最早更新', name_asc:'名称 A-Z', kind:'类型'};
@@ -1010,7 +1008,6 @@ function canvasAssetSortLabel(){
 function currentCanvasAssetItems(){
     const q = String(canvasAssetQuery || '').trim().toLowerCase();
     let list = uniqueCanvasAssets(canvasAssetsData.items || []).filter(item => {
-        if((item.canvas_kind || 'classic') !== activeCanvasAssetCategory) return false;
         if(activeCanvasAssetCanvasId && item.canvas_id !== activeCanvasAssetCanvasId) return false;
         if(!q) return true;
         return [
@@ -1281,10 +1278,7 @@ function normalizeCanvasAssetState(){
     const activeCanvas = activeCanvasAssetCanvas();
     if(
         activeCanvasAssetCanvasId
-        && (
-            !activeCanvas
-            || (activeCanvas.kind || 'classic') !== activeCanvasAssetCategory
-        )
+        && !activeCanvas
     ) activeCanvasAssetCanvasId = '';
     const items = currentCanvasAssetItems();
     if(selectedCanvasAssetId && !items.some(item => item.id === selectedCanvasAssetId)) selectedCanvasAssetId = '';

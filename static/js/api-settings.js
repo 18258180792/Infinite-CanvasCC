@@ -3330,6 +3330,7 @@ function renderModelPicker(){
     // 列表
     const html = list.map((id, index) => {
         const checked = pickerState.selected[id];
+        const curCat = pickerState.category[id] || 'chat';
         const label = modelDisplayName(id, item);
         const badge = providerModelBadge(id, label);
         return `
@@ -3341,6 +3342,11 @@ function renderModelPicker(){
                 <div class="picker-model-name" title="${escapeAttr(id)}">
                     <div class="picker-model-label">${escapeHtml(label || id)}</div>
                     ${label && label !== id ? `<div class="picker-model-id">${escapeHtml(id)}</div>` : ''}
+                </div>
+                <div class="picker-row-cats" onclick="event.stopPropagation()" title="切换该模型归属分类">
+                    <button type="button" class="${curCat==='image'?'active':''}" onclick="changePickerModelCat(${index}, 'image')">生图</button>
+                    <button type="button" class="${curCat==='chat'?'active':''}" onclick="changePickerModelCat(${index}, 'chat')">LLM</button>
+                    <button type="button" class="${curCat==='video'?'active':''}" onclick="changePickerModelCat(${index}, 'video')">视频</button>
                 </div>
             </div>
         `;
@@ -3365,11 +3371,71 @@ function togglePickerRowByIndex(index){
     if(typeof id !== 'string') return;
     togglePickerRow(id);
 }
+function changePickerModelCat(index, nextCat){
+    const id = pickerVisibleIds[index];
+    if(typeof id !== 'string' || !['image','chat','video'].includes(nextCat)) return;
+    pickerState.category[id] = nextCat;
+    pickerState.selected[id] = true;
+    renderModelPicker();
+}
+function bulkToggleVisiblePickerModels(checked){
+    (pickerVisibleIds || []).forEach(id => {
+        pickerState.selected[id] = Boolean(checked);
+    });
+    renderModelPicker();
+}
+function smartCurateModelSet(allIds, suggestion){
+    const curated = { image: [], chat: [], video: [] };
+    const ids = Array.isArray(allIds) ? allIds : [];
+    const skipNoise = /(?:embedding|rerank|whisper|tts|moderation|babbage|davinci|ada|realtime|audio|transcribe|-\d{4}-\d{2}-\d{2}$)/i;
+    const preferImg = /(?:gpt-image|seedream|flux|nano-banana|imagen|gemini[^/]*image|qwen-image|kolors|midjourney|mj-|ideogram|recraft|dall-e-3|grok-\d+-image|wanx)/i;
+    const preferChat = /(?:gpt-6|gpt-5|gpt-4\.1|gpt-4o(?!-audio|-realtime|-mini-tts)|^o3\b|^o4-mini|claude-(?:3-7|sonnet-4|opus-4|3-5-sonnet)|gemini-(?:2\.5|3)|deepseek-(?:chat|reasoner|v3|r1)|qwen(?:2\.5)?-(?:vl|max|plus)|doubao-1\.5|grok-3)/i;
+    const preferVid = /(?:seedance|veo|kling|wan2|luma|vidu|hailuo|sora|jimeng.*video)/i;
+
+    if (ids.length <= 24) {
+        ids.forEach(id => {
+            if (skipNoise.test(id)) return;
+            if (suggestion?.image?.has(id) || preferImg.test(id)) curated.image.push(id);
+            else if (suggestion?.video?.has(id) || preferVid.test(id)) curated.video.push(id);
+            else curated.chat.push(id);
+        });
+        return curated;
+    }
+
+    ids.forEach(id => {
+        if (skipNoise.test(id)) return;
+        const isImg = suggestion?.image?.has(id) || preferImg.test(id);
+        const isVid = !isImg && (suggestion?.video?.has(id) || preferVid.test(id));
+        if (isImg && preferImg.test(id) && curated.image.length < 14) curated.image.push(id);
+        else if (isVid && preferVid.test(id) && curated.video.length < 10) curated.video.push(id);
+        else if (!isImg && !isVid && preferChat.test(id) && curated.chat.length < 14) curated.chat.push(id);
+    });
+
+    if (!curated.image.length && suggestion?.image?.size) {
+        curated.image.push(...[...suggestion.image].filter(id => !skipNoise.test(id)).slice(0, 10));
+    }
+    if (!curated.chat.length && suggestion?.chat?.size) {
+        curated.chat.push(...[...suggestion.chat].filter(id => !skipNoise.test(id)).slice(0, 10));
+    }
+    if (!curated.video.length && suggestion?.video?.size) {
+        curated.video.push(...[...suggestion.video].filter(id => !skipNoise.test(id)).slice(0, 8));
+    }
+    return curated;
+}
+function smartCuratePickerModels(){
+    const allIds = Object.keys(pickerState.category);
+    const curated = smartCurateModelSet(allIds, lastFetchedSuggestion);
+    Object.keys(pickerState.selected).forEach(id => { pickerState.selected[id] = false; });
+    curated.image.forEach(id => { pickerState.category[id] = 'image'; pickerState.selected[id] = true; });
+    curated.chat.forEach(id => { pickerState.category[id] = 'chat'; pickerState.selected[id] = true; });
+    curated.video.forEach(id => { pickerState.category[id] = 'video'; pickerState.selected[id] = true; });
+    renderModelPicker();
+}
 function selectPickerCat(cat){
     document.querySelectorAll('.picker-cat-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === cat));
     renderModelPicker();
 }
-function applyModelPicker(){
+async function applyModelPicker(){
     const item = provider(); if(!item) return;
     const image = [], chat = [], video = [];
     const modelNames = {};
@@ -3388,8 +3454,9 @@ function applyModelPicker(){
     item.model_names = modelNames;
     renderModels('image'); renderModels('chat'); renderModels('video');
     renderMsLoras();
-    setStatus(`已应用 · 生图 ${image.length} / LLM ${chat.length} / 视频 ${video.length}，点保存生效`);
     closeModelPicker();
+    await saveProviders();
+    setStatus(`已保存模型 · 生图 ${image.length} / LLM ${chat.length} / 视频 ${video.length}`);
 }
 async function saveKeyOnly(){
     const item = provider();
@@ -3759,9 +3826,14 @@ async function loadProviders(){
     try {
         const data = await fetch('/api/providers').then(r => r.json());
         providers = data.providers || [];
-        selectedId = sortedProviders()[0]?.id || '';
+        const sorted = sortedProviders();
+        const preferred = sorted.find(p => p.has_key && !['modelscope', 'runninghub', 'volcengine'].includes(p.id))
+            || sorted.find(p => p.has_key)
+            || sorted[0];
+        selectedId = preferred?.id || '';
+        recommendInlineOpen = false;
+        syncRecommendView();
         renderEditor();
-        openRecommendApi();
         setStatus('');
     } catch(err) {
         setStatus(tr('api.loadFailed'));
@@ -3919,15 +3991,597 @@ window.addEventListener('studio-lang-change', () => {
     if(recommendInlineOpen) renderRecommendApi();
     else renderEditor();
 });
+/* ===== Quick Connect Wizard (Smart Relay Paste + Official API Presets + 1-Click Setup) ===== */
+const OFFICIAL_API_PRESETS = [
+    {
+        id: 'official-openai',
+        name: 'OpenAI 官方',
+        badge: 'OPENAI',
+        desc: 'GPT-Image-1 / GPT-4.1 / GPT-4o / o3 原生直连',
+        base_url: 'https://api.openai.com/v1',
+        protocol: 'openai',
+        image_request_mode: 'openai',
+        key_url: 'https://platform.openai.com/api-keys',
+        image_models: ['gpt-image-1', 'dall-e-3'],
+        chat_models: ['gpt-4.1', 'gpt-4o', 'o3', 'o4-mini'],
+        video_models: []
+    },
+    {
+        id: 'official-gemini',
+        name: 'Google Gemini 官方',
+        badge: 'GEMINI',
+        desc: 'AI Studio 官方 Key · Gemini 生图与多模态大脑',
+        base_url: 'https://generativelanguage.googleapis.com',
+        protocol: 'gemini',
+        image_request_mode: 'openai',
+        key_url: 'https://aistudio.google.com/apikey',
+        image_models: ['gemini-2.5-flash-image-preview', 'imagen-3.0-generate-002'],
+        chat_models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+        video_models: []
+    },
+    {
+        id: 'volcengine',
+        name: '火山方舟 · 豆包/即梦',
+        badge: 'ARK',
+        desc: '字节官方方舟 API · Seedream 生图 / Seedance 视频',
+        base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+        protocol: 'volcengine',
+        image_request_mode: 'openai',
+        key_url: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+        image_models: ['doubao-seedream-3-0-t2i-250415'],
+        chat_models: [],
+        video_models: ['doubao-seedance-1-0-pro-250528']
+    },
+    {
+        id: 'official-siliconflow',
+        name: '硅基流动 SiliconFlow',
+        badge: 'SF',
+        desc: '国内直连高速 · FLUX / Kolors / DeepSeek / Qwen-VL',
+        base_url: 'https://api.siliconflow.cn/v1',
+        protocol: 'openai',
+        image_request_mode: 'openai',
+        key_url: 'https://cloud.siliconflow.cn/account/ak',
+        image_models: ['Kwai-Kolors/Kolors', 'black-forest-labs/FLUX.1-schnell'],
+        chat_models: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-VL-72B-Instruct'],
+        video_models: ['Wan-AI/Wan2.1-T2V-14B']
+    },
+    {
+        id: 'official-deepseek',
+        name: 'DeepSeek 官方',
+        badge: 'DS',
+        desc: 'DeepSeek-V3 / R1 官方满血推理与提示词大脑',
+        base_url: 'https://api.deepseek.com/v1',
+        protocol: 'openai',
+        image_request_mode: 'openai',
+        key_url: 'https://platform.deepseek.com/api_keys',
+        image_models: [],
+        chat_models: ['deepseek-chat', 'deepseek-reasoner'],
+        video_models: []
+    },
+    {
+        id: 'official-dashscope',
+        name: '阿里云百炼 DashScope',
+        badge: 'ALIYUN',
+        desc: '通义千问 Qwen-VL / Max 官方 OpenAI 兼容接口',
+        base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        protocol: 'openai',
+        image_request_mode: 'openai',
+        key_url: 'https://bailian.console.aliyun.com/?apiKey=1',
+        image_models: [],
+        chat_models: ['qwen-vl-max', 'qwen-max', 'qwen-plus'],
+        video_models: []
+    },
+    {
+        id: 'official-openrouter',
+        name: 'OpenRouter 官方',
+        badge: 'OR',
+        desc: '海外全模型官方聚合 · Claude / GPT / Gemini 统一接口',
+        base_url: 'https://openrouter.ai/api/v1',
+        protocol: 'openai',
+        image_request_mode: 'openai',
+        key_url: 'https://openrouter.ai/keys',
+        image_models: [],
+        chat_models: ['anthropic/claude-3.7-sonnet', 'openai/gpt-4o', 'google/gemini-2.5-pro'],
+        video_models: []
+    },
+    {
+        id: 'official-xai',
+        name: 'xAI Grok 官方',
+        badge: 'XAI',
+        desc: 'Grok-3 对话与 Grok-2-Image 官方直连',
+        base_url: 'https://api.x.ai/v1',
+        protocol: 'openai',
+        image_request_mode: 'openai',
+        key_url: 'https://console.x.ai/',
+        image_models: ['grok-2-image'],
+        chat_models: ['grok-3', 'grok-2-vision-1212'],
+        video_models: []
+    }
+];
+
+let activeOfficialPresetId = 'official-openai';
+
+function normalizeSmartApiBaseUrl(rawUrl, protocolHint = '') {
+    let s = String(rawUrl || '').trim();
+    if (!s) return '';
+    s = s.replace(/[，。；、"'`]+$/g, '').trim();
+    if (!/^https?:\/\//i.test(s) && /^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(s)) {
+        s = 'https://' + s;
+    }
+    try {
+        const u = new URL(s);
+        let p = u.pathname.replace(/\/+$/, '');
+        // Strip accidental endpoint suffixes copied from docs
+        p = p.replace(/\/(chat\/completions|images\/generations|images\/edits|responses|models|completions)$/i, '');
+        const host = u.hostname.toLowerCase();
+        const isRootOnlyHost = (
+            protocolHint === 'gemini' ||
+            host.includes('googleapis.com') ||
+            host.includes('runninghub.') ||
+            host === 'grsaiapi.com' ||
+            host.endsWith('.grsaiapi.com') ||
+            host === 'apib.ai'
+        );
+        const hasVersionPath = /\/(v\d+|api\/v\d+|compatible-mode\/v\d+)$/i.test(p);
+        if (!p && !isRootOnlyHost && protocolHint !== 'volcengine') {
+            p = '/v1';
+        } else if (!hasVersionPath && !p && protocolHint === 'volcengine') {
+            p = '/api/v3';
+        }
+        return `${u.protocol}//${u.host}${p}`;
+    } catch (_) {
+        return s.replace(/\/+$/, '');
+    }
+}
+
+function deriveFriendlyProviderNameFromUrl(rawUrl) {
+    try {
+        const host = new URL(rawUrl).hostname.toLowerCase().replace(/^(?:www|api|open|ai|cloud)\./, '');
+        const known = {
+            'openai.com': 'OpenAI 官方',
+            'googleapis.com': 'Google Gemini',
+            'generativelanguage.googleapis.com': 'Google Gemini',
+            'siliconflow.cn': '硅基流动',
+            'deepseek.com': 'DeepSeek',
+            'aliyuncs.com': '阿里云百炼',
+            'volces.com': '火山方舟',
+            'openrouter.ai': 'OpenRouter',
+            'x.ai': 'xAI Grok',
+            'soonstudio.ai': 'SoonStudio',
+            'grsaiapi.com': 'Grsai API',
+            'comfly.org': 'APIMART'
+        };
+        for (const [domain, title] of Object.entries(known)) {
+            if (host === domain || host.endsWith('.' + domain)) return title;
+        }
+        const mainSeg = host.split('.')[0] || host;
+        return mainSeg.length <= 14 ? `${mainSeg.toUpperCase()} 中转` : host;
+    } catch (_) {
+        return '自定义中转';
+    }
+}
+
+function switchQuickConnectTab(tab) {
+    const isRelay = tab !== 'official';
+    const card = document.getElementById('quickConnectCard');
+    if (card) card.classList.remove('is-collapsed');
+    document.querySelectorAll('[data-qc-tab]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.qcTab === (isRelay ? 'relay' : 'official'));
+    });
+    const relayPane = document.getElementById('qcPaneRelay');
+    const officialPane = document.getElementById('qcPaneOfficial');
+    if (relayPane) relayPane.hidden = !isRelay;
+    if (officialPane) officialPane.hidden = isRelay;
+    if (!isRelay) renderOfficialPresetsGrid();
+}
+
+function toggleQuickConnectCollapse() {
+    const card = document.getElementById('quickConnectCard');
+    if (!card) return;
+    card.classList.toggle('is-collapsed');
+}
+
+function handleQuickRelayUrlChange(val) {
+    const nameEl = document.getElementById('qcRelayNameInput');
+    if (nameEl && (!nameEl.value.trim() || nameEl.dataset.autoNamed === '1')) {
+        const normalized = normalizeSmartApiBaseUrl(val);
+        if (/^https?:\/\//i.test(normalized)) {
+            nameEl.value = deriveFriendlyProviderNameFromUrl(normalized);
+            nameEl.dataset.autoNamed = '1';
+        }
+    }
+}
+
+function handleSmartRelayPaste(rawText) {
+    const text = String(rawText || '').trim();
+    if (!text) return;
+    const urlMatch = text.match(/https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/);
+    // Match sk-xxx, Bearer xxx, or long token strings not part of the URL
+    const withoutUrls = text.replace(/https?:\/\/\S+/g, ' ');
+    const keyMatch = withoutUrls.match(/\b(sk-[A-Za-z0-9._-]{12,}|ms-[A-Za-z0-9._-]{12,}|AIza[0-9A-Za-z_-]{25,}|[A-Za-z0-9_-]{32,})\b/);
+
+    const urlEl = document.getElementById('qcRelayUrlInput');
+    const keyEl = document.getElementById('qcRelayKeyInput');
+    const nameEl = document.getElementById('qcRelayNameInput');
+
+    if (urlMatch && urlEl) {
+        const cleanedUrl = normalizeSmartApiBaseUrl(urlMatch[0]);
+        urlEl.value = cleanedUrl;
+        if (nameEl && (!nameEl.value.trim() || nameEl.dataset.autoNamed === '1')) {
+            nameEl.value = deriveFriendlyProviderNameFromUrl(cleanedUrl);
+            nameEl.dataset.autoNamed = '1';
+        }
+    }
+    if (keyMatch && keyEl) {
+        keyEl.value = keyMatch[1].trim();
+    }
+}
+
+function setQuickStatus(elId, html, tone = 'muted') {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    el.hidden = !html;
+    el.dataset.tone = tone;
+    el.innerHTML = html;
+}
+
+async function runAutoSetupPipelineForProvider(targetItem, apiKey, fallbackModels = null, statusCallback = null) {
+    const notify = msg => {
+        setStatus(msg);
+        if (typeof statusCallback === 'function') statusCallback(msg);
+    };
+    const baseUrl = targetItem.base_url;
+    let detectedProto = targetItem.protocol || 'openai';
+    let detectedImgMode = targetItem.image_request_mode || 'openai';
+
+    // Step 1: Auto-probe sync/async protocol for OpenAI/APIMart relays
+    if (!['gemini', 'volcengine', 'runninghub'].includes(detectedProto) && baseUrl) {
+        notify('正在自动探测中转协议与生图接口模式…');
+        try {
+            const probeRes = await fetch('/api/providers/probe-async', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    base_url: baseUrl,
+                    api_key: apiKey,
+                    provider_id: targetItem.id,
+                    protocol: detectedProto,
+                    image_request_mode: detectedImgMode
+                })
+            });
+            if (probeRes.ok) {
+                const pData = await probeRes.json();
+                if (pData.protocol && ['openai', 'apimart', 'volcengine'].includes(String(pData.protocol).toLowerCase())) {
+                    detectedProto = String(pData.protocol).toLowerCase();
+                }
+                if (pData.image_request_mode) {
+                    detectedImgMode = normalizeImageRequestMode(pData.image_request_mode);
+                }
+            }
+        } catch (_) {}
+    }
+
+    targetItem.protocol = detectedProto;
+    targetItem.image_request_mode = detectedImgMode;
+
+    // Step 2: Fetch upstream models & auto-curate
+    let fetchedCount = 0;
+    if (baseUrl) {
+        notify('正在从上游拉取可用模型并自动分类…');
+        try {
+            const fetchRes = await fetch('/api/providers/fetch-models', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    base_url: baseUrl,
+                    api_key: apiKey,
+                    provider_id: targetItem.id,
+                    protocol: detectedProto,
+                    image_request_mode: detectedImgMode
+                })
+            });
+            if (fetchRes.ok) {
+                const mData = await fetchRes.json();
+                setFetchedModelState(mData);
+                fetchedCount = Array.isArray(mData.all) ? mData.all.length : 0;
+                if (fetchedCount > 0) {
+                    const openBtn = document.getElementById('openPickerBtn');
+                    if (openBtn) { openBtn.disabled = false; openBtn.style.opacity = '1'; }
+                    const curated = smartCurateModelSet(mData.all, lastFetchedSuggestion);
+                    targetItem.image_models = unique([...(targetItem.image_models || []), ...curated.image]);
+                    targetItem.chat_models = unique([...(targetItem.chat_models || []), ...curated.chat]);
+                    targetItem.video_models = unique([...(targetItem.video_models || []), ...curated.video]);
+                }
+            }
+        } catch (_) {}
+    }
+
+    // Apply fallback preset models if upstream didn't return models (e.g. Volcengine ep- or strict key permissions)
+    if (fallbackModels) {
+        if (!targetItem.image_models?.length && fallbackModels.image_models?.length) {
+            targetItem.image_models = unique(fallbackModels.image_models);
+        }
+        if (!targetItem.chat_models?.length && fallbackModels.chat_models?.length) {
+            targetItem.chat_models = unique(fallbackModels.chat_models);
+        }
+        if (!targetItem.video_models?.length && fallbackModels.video_models?.length) {
+            targetItem.video_models = unique(fallbackModels.video_models);
+        }
+    }
+
+    if (apiKey) targetItem.api_key = apiKey;
+
+    selectedId = targetItem.id;
+    recommendInlineOpen = false;
+    syncRecommendView();
+    renderProviderList();
+    renderEditor();
+
+    notify('正在写入加密配置并同步到画布…');
+    const saved = await saveProviders();
+    return {
+        saved,
+        fetchedCount,
+        imageCount: (targetItem.image_models || []).length,
+        chatCount: (targetItem.chat_models || []).length,
+        videoCount: (targetItem.video_models || []).length,
+        protocol: detectedProto,
+        imageMode: detectedImgMode
+    };
+}
+
+async function quickConnectRelayRun() {
+    const urlEl = document.getElementById('qcRelayUrlInput');
+    const keyEl = document.getElementById('qcRelayKeyInput');
+    const nameEl = document.getElementById('qcRelayNameInput');
+    const btn = document.getElementById('qcRelayRunBtn');
+
+    const cleanedUrl = normalizeSmartApiBaseUrl(urlEl?.value || '');
+    const apiKey = String(keyEl?.value || '').trim();
+    if (!cleanedUrl) {
+        setQuickStatus('qcRelayStatus', '⚠ 请先粘贴或填写中转站接口地址 (Base URL)', 'warn');
+        urlEl?.focus();
+        return;
+    }
+    if (!apiKey) {
+        setQuickStatus('qcRelayStatus', '⚠ 请填写 API Key (如 sk-...)', 'warn');
+        keyEl?.focus();
+        return;
+    }
+    if (urlEl) urlEl.value = cleanedUrl;
+    const displayName = String(nameEl?.value || '').trim() || deriveFriendlyProviderNameFromUrl(cleanedUrl);
+
+    // Reuse existing provider with identical host+path if present, otherwise create new
+    let target = providers.find(p =>
+        !['modelscope', 'runninghub', 'volcengine'].includes(p.id) &&
+        normalizeSmartApiBaseUrl(p.base_url).toLowerCase() === cleanedUrl.toLowerCase()
+    );
+    if (!target) {
+        const newId = deriveIdFromName(displayName, '');
+        target = {
+            id: newId,
+            name: displayName,
+            base_url: cleanedUrl,
+            protocol: cleanedUrl.includes('googleapis.com') ? 'gemini' : 'openai',
+            image_request_mode: cleanedUrl.includes('grsaiapi.com') ? 'grsai' : 'openai',
+            image_edit_route: 'general',
+            enabled: true,
+            primary: false,
+            image_models: [],
+            chat_models: [],
+            video_models: [],
+            has_key: false,
+            key_preview: ''
+        };
+        providers.push(target);
+    } else {
+        target.name = displayName || target.name;
+        target.base_url = cleanedUrl;
+    }
+
+    if (btn) btn.disabled = true;
+    try {
+        const result = await runAutoSetupPipelineForProvider(target, apiKey, null, stepMsg => {
+            setQuickStatus('qcRelayStatus', `⏳ ${escapeHtml(stepMsg)}`, 'muted');
+        });
+        if (result.saved) {
+            if (keyEl) keyEl.value = '';
+            const pasteEl = document.getElementById('qcSmartPasteInput');
+            if (pasteEl) pasteEl.value = '';
+            const pickerTrigger = result.fetchedCount > 0
+                ? ` · <button type="button" class="qc-inline-link" onclick="openModelPicker()">微调已选模型 (上游共 ${result.fetchedCount} 个)</button>`
+                : '';
+            setQuickStatus(
+                'qcRelayStatus',
+                `✓ <strong>${escapeHtml(target.name)}</strong> 接入完成！协议：<strong>${escapeHtml(result.protocol.toUpperCase())}</strong> · 已启用 生图 ${result.imageCount} / 对话 ${result.chatCount} / 视频 ${result.videoCount} 个模型${pickerTrigger}`,
+                'ok'
+            );
+        } else {
+            setQuickStatus('qcRelayStatus', '⚠ 保存失败，请检查右侧状态提示', 'warn');
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+        refreshIcons();
+    }
+}
+
+function renderOfficialPresetsGrid() {
+    const grid = document.getElementById('qcOfficialGrid');
+    if (!grid) return;
+    grid.innerHTML = OFFICIAL_API_PRESETS.map(p => {
+        const existing = providers.find(item =>
+            item.id === p.id || normalizeSmartApiBaseUrl(item.base_url, p.protocol).toLowerCase() === p.base_url.toLowerCase()
+        );
+        const configured = Boolean(existing?.has_key);
+        return `
+            <button type="button" class="qc-official-card ${activeOfficialPresetId === p.id ? 'active' : ''}" onclick="selectOfficialPreset('${escapeAttr(p.id)}')">
+                <div class="qc-official-top">
+                    <span class="qc-official-badge">${escapeHtml(p.badge)}</span>
+                    ${configured ? '<span class="qc-official-configured">已配置</span>' : ''}
+                </div>
+                <div class="qc-official-name">${escapeHtml(p.name)}</div>
+                <div class="qc-official-desc">${escapeHtml(p.desc)}</div>
+            </button>
+        `;
+    }).join('');
+    selectOfficialPreset(activeOfficialPresetId, false);
+}
+
+function selectOfficialPreset(presetId, focusKey = true) {
+    const preset = OFFICIAL_API_PRESETS.find(p => p.id === presetId) || OFFICIAL_API_PRESETS[0];
+    if (!preset) return;
+    activeOfficialPresetId = preset.id;
+    document.querySelectorAll('.qc-official-card').forEach(el => {
+        el.classList.toggle('active', el.getAttribute('onclick')?.includes(`'${preset.id}'`));
+    });
+    const bar = document.getElementById('qcOfficialKeyBar');
+    if (bar) bar.hidden = false;
+    const nameEl = document.getElementById('qcOfficialSelectedName');
+    const urlEl = document.getElementById('qcOfficialSelectedUrl');
+    const linkEl = document.getElementById('qcOfficialKeyLink');
+    const keyInputEl = document.getElementById('qcOfficialKeyInput');
+    if (nameEl) nameEl.textContent = preset.name;
+    if (urlEl) urlEl.textContent = preset.base_url;
+    if (linkEl) linkEl.href = preset.key_url;
+    setQuickStatus('qcOfficialStatus', '');
+    if (focusKey && keyInputEl) keyInputEl.focus();
+}
+
+async function quickConnectOfficialRun() {
+    const preset = OFFICIAL_API_PRESETS.find(p => p.id === activeOfficialPresetId);
+    if (!preset) return;
+    const keyEl = document.getElementById('qcOfficialKeyInput');
+    const btn = document.getElementById('qcOfficialSaveBtn');
+    const apiKey = String(keyEl?.value || '').trim();
+    if (!apiKey) {
+        setQuickStatus('qcOfficialStatus', `⚠ 请先粘贴 ${escapeHtml(preset.name)} 的 API Key`, 'warn');
+        keyEl?.focus();
+        return;
+    }
+
+    let target = providers.find(item =>
+        item.id === preset.id ||
+        normalizeSmartApiBaseUrl(item.base_url, preset.protocol).toLowerCase() === preset.base_url.toLowerCase()
+    );
+    if (!target) {
+        target = {
+            id: deriveIdFromName(preset.id, ''),
+            name: preset.name,
+            base_url: preset.base_url,
+            protocol: preset.protocol,
+            image_request_mode: preset.image_request_mode || 'openai',
+            image_edit_route: 'general',
+            enabled: true,
+            primary: false,
+            image_models: [...(preset.image_models || [])],
+            chat_models: [...(preset.chat_models || [])],
+            video_models: [...(preset.video_models || [])],
+            has_key: false,
+            key_preview: ''
+        };
+        providers.push(target);
+    } else {
+        target.base_url = preset.base_url;
+        target.protocol = preset.protocol;
+    }
+
+    if (btn) btn.disabled = true;
+    try {
+        const result = await runAutoSetupPipelineForProvider(target, apiKey, preset, stepMsg => {
+            setQuickStatus('qcOfficialStatus', `⏳ ${escapeHtml(stepMsg)}`, 'muted');
+        });
+        if (result.saved) {
+            if (keyEl) keyEl.value = '';
+            renderOfficialPresetsGrid();
+            const pickerTrigger = result.fetchedCount > 0
+                ? ` · <button type="button" class="qc-inline-link" onclick="openModelPicker()">微调模型列表 (上游共 ${result.fetchedCount} 个)</button>`
+                : '';
+            setQuickStatus(
+                'qcOfficialStatus',
+                `✓ <strong>${escapeHtml(preset.name)}</strong> 已启用并保存！生图 ${result.imageCount} / 对话 ${result.chatCount} / 视频 ${result.videoCount} 个模型就绪${pickerTrigger}`,
+                'ok'
+            );
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+        refreshIcons();
+    }
+}
+
+async function oneClickVerifyFetchSave() {
+    const item = provider();
+    if (!item) return;
+    syncEditor();
+    const cleaned = normalizeSmartApiBaseUrl(baseInput?.value || item.base_url, item.protocol);
+    if (cleaned && baseInput) {
+        baseInput.value = cleaned;
+        item.base_url = cleaned;
+    }
+    const apiKey = currentProviderApiKey(item);
+    const btn = document.getElementById('oneClickSetupBtn');
+    if (btn) btn.disabled = true;
+    showVerifyResult(`<span style="color:var(--muted);font-size:11px;font-weight:700">⏳ 正在自动检测协议、拉取模型并保存…</span>`);
+    try {
+        const res = await runAutoSetupPipelineForProvider(item, apiKey, null, stepMsg => {
+            showVerifyResult(`<span style="color:var(--muted);font-size:11px;font-weight:700">⏳ ${escapeHtml(stepMsg)}</span>`);
+        });
+        if (res.saved) {
+            if (keyInput) keyInput.value = '';
+            const pickerBtnHtml = res.fetchedCount > 0
+                ? ` · <button type="button" class="qc-inline-link" onclick="openModelPicker()">点击打开模型选择器 (${res.fetchedCount})</button>`
+                : '';
+            showVerifyResult(`<span style="color:#34d399;font-size:11.5px;font-weight:700">✓ 一键配置成功 · 协议 ${escapeHtml(res.protocol.toUpperCase())} · 已保存 生图 ${res.imageCount} / LLM ${res.chatCount} / 视频 ${res.videoCount} 个模型${pickerBtnHtml}</span>`);
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+        refreshIcons();
+    }
+}
+
+async function batchPasteModels(kind) {
+    const item = provider();
+    if (!item) return;
+    const label = kind === 'image' ? '生图模型' : kind === 'video' ? '视频模型' : '聊天模型';
+    const raw = window.prompt(`请粘贴要添加的${label} ID（支持用逗号、空格或换行分隔多个模型）：`, '');
+    if (!raw || !raw.trim()) return;
+    const additions = raw
+        .split(/[\r\n,，;；\s]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+    if (!additions.length) return;
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    item[key] = unique([...(item[key] || []), ...additions]);
+    renderModels(kind);
+    if (kind === 'image') renderMsLoras();
+    await saveProviders();
+}
+
 window.onload = () => {
     if(window.StudioTheme) window.StudioTheme.apply();
     if(window.StudioI18n) window.StudioI18n.apply();
+    const relayNameInput = document.getElementById('qcRelayNameInput');
+    if (relayNameInput) {
+        relayNameInput.addEventListener('input', () => { relayNameInput.dataset.autoNamed = '0'; });
+    }
     syncRecommendView();
     loadProviders();
     // 平台名输入时实时预览生成的 ID
     if(nameInput) nameInput.addEventListener('input', updateIdPreview);
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
-    if(baseInput) baseInput.addEventListener('input', () => { updateApimartDomesticHint(); syncSoonStudioEndpointRow(); });
+    if(baseInput) {
+        baseInput.addEventListener('input', () => { updateApimartDomesticHint(); syncSoonStudioEndpointRow(); });
+        baseInput.addEventListener('blur', () => {
+            const p = String(protocolInput?.value || '').toLowerCase();
+            if (!CLI_PROTOCOLS.has(p) && baseInput.value.trim()) {
+                const cleaned = normalizeSmartApiBaseUrl(baseInput.value, p);
+                if (cleaned && cleaned !== baseInput.value.trim()) {
+                    baseInput.value = cleaned;
+                    const cur = provider();
+                    if (cur) cur.base_url = cleaned;
+                }
+            }
+        });
+    }
     if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
         const item = provider();
         if(!item) return;
