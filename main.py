@@ -201,7 +201,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.21.1"
+APP_VERSION = "2026.11.21.2"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -1601,7 +1601,10 @@ def normalize_provider(item):
     video_models = model_list_from_values(item.get("video_models") or [])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
-    return {
+    proxy_mode = str(item.get("proxy_mode") or "").strip().lower()
+    if proxy_mode not in {"auto", "direct", "proxy"}:
+        proxy_mode = ""
+    result = {
         "id": provider_id,
         "name": name,
         "base_url": base_url,
@@ -1624,6 +1627,9 @@ def normalize_provider(item):
         "volcengine_project_name": volc_project,
         "volcengine_region": volc_region,
     }
+    if proxy_mode:
+        result["proxy_mode"] = proxy_mode
+    return result
 
 def load_api_providers():
     defaults = default_api_providers()
@@ -7399,18 +7405,28 @@ def image_task_fail_reason(payload):
     error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
     return task_data.get("fail_reason") or task_data.get("message") or error.get("message") or (payload.get("message") if isinstance(payload, dict) else "") or "生图任务失败"
 
-async def httpx_request_with_transient_retries(client, method, url, attempts=2, retry_delay=1.2, **kwargs):
+IMAGE_TASK_POLL_REQUEST_TIMEOUT = httpx.Timeout(connect=10.0, read=12.0, write=10.0, pool=10.0)
+IMAGE_TASK_POLL_HARD_TIMEOUT = 15.0
+
+async def httpx_request_with_transient_retries(client, method, url, attempts=2, retry_delay=1.2, hard_timeout=None, **kwargs):
     attempts = max(1, int(attempts or 1))
     last_exc = None
     retry_statuses = {502, 503, 504, 520, 522, 524}
     for attempt in range(attempts):
         try:
-            response = await client.request(method, url, **kwargs)
+            req_coro = client.request(method, url, **kwargs)
+            if hard_timeout and hard_timeout > 0:
+                try:
+                    response = await asyncio.wait_for(req_coro, timeout=hard_timeout)
+                except asyncio.TimeoutError as exc:
+                    raise httpx.ReadTimeout(f"请求超时 ({hard_timeout:g}s): {method} {url}") from exc
+            else:
+                response = await req_coro
             if response.status_code in retry_statuses and attempt + 1 < attempts:
                 await asyncio.sleep(retry_delay * (attempt + 1))
                 continue
             return response
-        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout) as exc:
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout, httpx.ProxyError) as exc:
             last_exc = exc
             if attempt + 1 >= attempts:
                 raise
@@ -7449,13 +7465,37 @@ def requests_get_with_transient_retries(url, attempts=3, retry_delay=0.35, **kwa
 
 async def fetch_image_task_payload(client, task_id, provider=None, model=""):
     task_url = image_task_url_for_provider(provider, task_id)
-    response = await httpx_request_with_transient_retries(
-        client,
-        "GET",
-        task_url,
-        attempts=3,
-        headers=api_headers(provider=provider, model=model),
-    )
+    headers = api_headers(provider=provider, model=model)
+    try:
+        response = await httpx_request_with_transient_retries(
+            client,
+            "GET",
+            task_url,
+            attempts=3,
+            retry_delay=0.8,
+            hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+            timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+            headers=headers,
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ProxyError):
+        if provider_trust_env(provider) and httpx.AsyncClient is _ORIGINAL_HTTPX_ASYNC_CLIENT:
+            async with shared_async_http_client(
+                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                trust_env=False,
+                follow_redirects=True,
+            ) as direct_client:
+                response = await httpx_request_with_transient_retries(
+                    direct_client,
+                    "GET",
+                    task_url,
+                    attempts=2,
+                    retry_delay=0.6,
+                    hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                    timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                    headers=headers,
+                )
+        else:
+            raise
     response.raise_for_status()
     return response.json()
 
@@ -11309,7 +11349,7 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
         payload["image_url"] = refs
 
     api_root = modelscope_image_api_root()
-    async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+    async with shared_async_http_client(timeout=AI_REQUEST_TIMEOUT, trust_env=provider_trust_env(provider)) as client:
         submit_res = await client.post(f"{api_root}/images/generations", headers=headers, json=payload)
         submit_res.raise_for_status()
         raw = submit_res.json()
@@ -11324,8 +11364,14 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
         last_payload = raw
         while time.monotonic() < deadline:
             await asyncio.sleep(IMAGE_POLL_INTERVAL)
-            result = await client.get(
+            result = await httpx_request_with_transient_retries(
+                client,
+                "GET",
                 f"{api_root}/tasks/{task_id}",
+                attempts=3,
+                retry_delay=0.8,
+                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
                 headers={**headers, "X-ModelScope-Task-Type": "image_generation"},
             )
             result.raise_for_status()
@@ -12098,7 +12144,17 @@ async def wait_for_runninghub_image_task(client, provider, task_id):
     last_payload = None
     while time.monotonic() < deadline:
         await asyncio.sleep(2)
-        response = await client.post(query_url, headers=runninghub_api_headers(provider), json={"taskId": task_id})
+        response = await httpx_request_with_transient_retries(
+            client,
+            "POST",
+            query_url,
+            attempts=3,
+            retry_delay=0.8,
+            hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+            timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+            headers=runninghub_api_headers(provider),
+            json={"taskId": task_id},
+        )
         response.raise_for_status()
         raw = response.json()
         last_payload = raw
@@ -12445,7 +12501,17 @@ async def generate_runninghub_entry_image(prompt, size, model, reference_images,
         last_payload = None
         while time.monotonic() < deadline:
             await asyncio.sleep(2.5)
-            query_response = await client.post(query_url, headers=runninghub_app_headers(True), json={"apiKey": api_key, "taskId": task_id})
+            query_response = await httpx_request_with_transient_retries(
+                client,
+                "POST",
+                query_url,
+                attempts=3,
+                retry_delay=0.8,
+                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                headers=runninghub_app_headers(True, provider=provider),
+                json={"apiKey": api_key, "taskId": task_id},
+            )
             query_raw = query_response.json()
             last_payload = query_raw
             code = query_raw.get("code") if isinstance(query_raw, dict) else None
@@ -12520,7 +12586,17 @@ async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kin
     last_payload = None
     while time.monotonic() < deadline:
         await asyncio.sleep(3)
-        response = await client.post(query_url, headers=runninghub_json_headers(provider), json={"taskId": task_id})
+        response = await httpx_request_with_transient_retries(
+            client,
+            "POST",
+            query_url,
+            attempts=3,
+            retry_delay=0.8,
+            hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+            timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+            headers=runninghub_json_headers(provider),
+            json={"taskId": task_id},
+        )
         response.raise_for_status()
         raw = response.json()
         last_payload = raw
@@ -12683,7 +12759,17 @@ async def generate_grsai_provider_image(prompt, size, model, reference_images=No
         while time.monotonic() < deadline:
             step_sleep = 1.4 if (time.monotonic() - started) < 35.0 else 2.4
             await asyncio.sleep(step_sleep)
-            poll = await client.get(result_url, params={"id": task_id}, headers=api_headers(provider=provider, model=model_value))
+            poll = await httpx_request_with_transient_retries(
+                client,
+                "GET",
+                result_url,
+                attempts=3,
+                retry_delay=0.8,
+                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                params={"id": task_id},
+                headers=api_headers(provider=provider, model=model_value),
+            )
             poll.raise_for_status()
             last = poll.json()
             poll_status = str(last.get("status") or "").strip().lower() if isinstance(last, dict) else ""
@@ -15585,18 +15671,33 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
     if not api_key:
         raise HTTPException(status_code=400, detail="请先填写或保存 API Key")
     if is_soonstudio_provider({"base_url": base_url}):
+        prefer_proxy = provider_trust_env({"base_url": base_url})
         try:
-            async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=15, trust_env=prefer_proxy) as client:
                 ok, probe = await probe_openai_models_endpoint(client, base_url, api_key)
         except (httpx.HTTPError, ssl.SSLError) as exc:
-            return {
-                "ok": False,
-                "protocol": "openai",
-                "image_request_mode": "openai",
-                "status_code": 0,
-                "message": f"SoonStudio 当前线路直连失败（{type(exc).__name__}），请切换线路后重试",
-                "raw": None,
-            }
+            if prefer_proxy:
+                try:
+                    async with httpx.AsyncClient(timeout=15, trust_env=False) as direct_client:
+                        ok, probe = await probe_openai_models_endpoint(direct_client, base_url, api_key)
+                except (httpx.HTTPError, ssl.SSLError) as direct_exc:
+                    return {
+                        "ok": False,
+                        "protocol": "openai",
+                        "image_request_mode": "openai",
+                        "status_code": 0,
+                        "message": f"SoonStudio 当前线路连接失败（{type(direct_exc).__name__}），建议切换到默认主线 https://api.soonstudio.ai/v1",
+                        "raw": None,
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "protocol": "openai",
+                    "image_request_mode": "openai",
+                    "status_code": 0,
+                    "message": f"SoonStudio 当前线路连接失败（{type(exc).__name__}），建议切换到默认主线 https://api.soonstudio.ai/v1",
+                    "raw": None,
+                }
         return {
             "ok": ok,
             "protocol": "openai",

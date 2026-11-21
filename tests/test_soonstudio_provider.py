@@ -133,6 +133,42 @@ class SoonStudioProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 502)
         self.assertEqual(len(requests), 1)
 
+    async def test_poll_uses_short_timeout_and_recovers_from_stalled_poll_request(self):
+        normalized = main.normalize_provider({**self.provider, "proxy_mode": "direct"})
+        self.assertEqual(normalized.get("proxy_mode"), "direct")
+
+        import asyncio
+        seen_timeouts = []
+        call_count = 0
+
+        class FakeScopedClient:
+            async def request(self, method, url, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                seen_timeouts.append(kwargs.get("timeout"))
+                if call_count == 1:
+                    await asyncio.sleep(5.0)
+                return httpx.Response(
+                    200,
+                    json={
+                        "task_id": "task-stalled-1",
+                        "status": "SUCCESS",
+                        "data": {"url": IMAGE_URL},
+                    },
+                    request=httpx.Request(method, url),
+                )
+
+        with patch.object(main, "provider_env_key_value", return_value="test-key"), \
+             patch.object(main, "IMAGE_TASK_POLL_HARD_TIMEOUT", 0.05):
+            payload = await main.fetch_image_task_payload(
+                FakeScopedClient(), "task-stalled-1", self.provider, model="Dola-Seedream-5.0-Flash"
+            )
+
+        self.assertEqual(call_count, 2)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertIsInstance(seen_timeouts[0], httpx.Timeout)
+        self.assertLessEqual(seen_timeouts[0].read, 15.0)
+
 
 if __name__ == "__main__":
     unittest.main()

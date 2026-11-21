@@ -4120,6 +4120,7 @@ function normalizeSmartApiBaseUrl(rawUrl, protocolHint = '') {
             host.includes('runninghub.') ||
             host === 'grsaiapi.com' ||
             host.endsWith('.grsaiapi.com') ||
+            host === 'grsai.dakka.com.cn' ||
             host === 'apib.ai'
         );
         const hasVersionPath = /\/(v\d+|api\/v\d+|compatible-mode\/v\d+)$/i.test(p);
@@ -4149,6 +4150,7 @@ function deriveFriendlyProviderNameFromUrl(rawUrl) {
             'x.ai': 'xAI Grok',
             'soonstudio.ai': 'SoonStudio',
             'grsaiapi.com': 'Grsai API',
+            'grsai.dakka.com.cn': 'Grsai 国内专线',
             'comfly.org': 'APIMART'
         };
         for (const [domain, title] of Object.entries(known)) {
@@ -4363,7 +4365,7 @@ async function quickConnectRelayRun() {
             name: displayName,
             base_url: cleanedUrl,
             protocol: cleanedUrl.includes('googleapis.com') ? 'gemini' : 'openai',
-            image_request_mode: cleanedUrl.includes('grsaiapi.com') ? 'grsai' : 'openai',
+            image_request_mode: (cleanedUrl.includes('grsaiapi.com') || cleanedUrl.includes('grsai.dakka.com.cn')) ? 'grsai' : 'openai',
             image_edit_route: 'general',
             enabled: true,
             primary: false,
