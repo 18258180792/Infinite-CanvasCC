@@ -88,11 +88,190 @@
         return readJsonStorage(GPT_CHAT_SETTINGS_KEY, {});
     }
 
+    const AGENT_LAYOUT_DEFAULTS = {
+        dockWidthMin: 340,
+        dockWidthMax: 580,
+        dockWidthDefault: 404,
+        floatMinW: 340,
+        floatMaxW: 620,
+        floatDefaultW: 396,
+        floatMinH: 420,
+        floatDefaultH: 640,
+        dockSnapPointerMargin: 52,
+        dockSnapEdgeMargin: 26,
+        edgeMagnetThreshold: 24,
+        safeTop: 56,
+        safeGutter: 14
+    };
+
+    function clampAgentDockWidth(rawWidth) {
+        const n = Number(rawWidth);
+        if (!Number.isFinite(n) || n <= 0) return AGENT_LAYOUT_DEFAULTS.dockWidthDefault;
+        return Math.round(Math.max(AGENT_LAYOUT_DEFAULTS.dockWidthMin, Math.min(AGENT_LAYOUT_DEFAULTS.dockWidthMax, n)));
+    }
+
+    function normalizeAgentFloatRect(rawRect, viewportW = (typeof window !== 'undefined' ? window.innerWidth : 1280), viewportH = (typeof window !== 'undefined' ? window.innerHeight : 800)) {
+        const vw = Math.max(360, Number(viewportW) || 1280);
+        const vh = Math.max(480, Number(viewportH) || 800);
+        const maxW = Math.min(AGENT_LAYOUT_DEFAULTS.floatMaxW, Math.max(AGENT_LAYOUT_DEFAULTS.floatMinW, vw - 24));
+        const minH = Math.min(AGENT_LAYOUT_DEFAULTS.floatMinH, Math.max(280, vh - 72));
+        const maxH = Math.max(minH, vh - 72);
+        const defaultH = Math.min(AGENT_LAYOUT_DEFAULTS.floatDefaultH, Math.max(minH, vh - 136));
+
+        const width = Math.round(Math.max(AGENT_LAYOUT_DEFAULTS.floatMinW, Math.min(maxW, Number(rawRect?.width) || AGENT_LAYOUT_DEFAULTS.floatDefaultW)));
+        const height = Math.round(Math.max(minH, Math.min(maxH, Number(rawRect?.height) || defaultH)));
+        const fallbackLeft = Math.max(AGENT_LAYOUT_DEFAULTS.safeGutter, vw - width - 34);
+        const fallbackTop = Math.max(AGENT_LAYOUT_DEFAULTS.safeTop, Math.min(78, vh - height - AGENT_LAYOUT_DEFAULTS.safeGutter));
+
+        const rawLeft = Number(rawRect?.left);
+        const rawTop = Number(rawRect?.top);
+        const maxLeft = Math.max(AGENT_LAYOUT_DEFAULTS.safeGutter, vw - width - 12);
+        const maxTop = Math.max(AGENT_LAYOUT_DEFAULTS.safeTop, vh - height - AGENT_LAYOUT_DEFAULTS.safeGutter);
+        const left = Math.round(Math.max(10, Math.min(maxLeft, Number.isFinite(rawLeft) ? rawLeft : fallbackLeft)));
+        const top = Math.round(Math.max(AGENT_LAYOUT_DEFAULTS.safeTop, Math.min(maxTop, Number.isFinite(rawTop) ? rawTop : fallbackTop)));
+
+        return { left, top, width, height };
+    }
+
+    function computeAgentFloatSnap(rect, pointerX, viewportW, viewportH, options = {}) {
+        const vw = Math.max(360, Number(viewportW) || 1280);
+        const vh = Math.max(480, Number(viewportH) || 800);
+        const minW = options.minWidth || 340;
+        const maxW = Math.min(options.maxWidth || 620, Math.max(minW, vw - 24));
+        const minH = Math.min(options.minHeight || 420, Math.max(280, vh - 72));
+        const maxH = Math.max(minH, vh - 72);
+
+        const width = Math.round(Math.max(minW, Math.min(maxW, Number(rect?.width) || 396)));
+        const height = Math.round(Math.max(minH, Math.min(maxH, Number(rect?.height) || 640)));
+
+        const dockEnabled = vw >= 720 && options.allowDock !== false;
+        const pointerMargin = options.dockSnapPointerMargin ?? 52;
+        const edgeMargin = options.dockSnapEdgeMargin ?? 26;
+        const magnet = options.edgeMagnetThreshold ?? 24;
+        const safeTop = options.safeTop ?? 56;
+        const safeGutter = options.safeGutter ?? 14;
+
+        const rawLeft = Number(rect?.left);
+        const rawTop = Number(rect?.top);
+        let left = Number.isFinite(rawLeft) ? rawLeft : Math.max(safeGutter, vw - width - 34);
+        let top = Number.isFinite(rawTop) ? rawTop : Math.max(safeTop, Math.min(78, vh - height - safeGutter));
+
+        const maxLeft = Math.max(safeGutter, vw - width - 10);
+        const maxTop = Math.max(safeTop, vh - height - safeGutter);
+        left = Math.max(10, Math.min(maxLeft, left));
+        top = Math.max(safeTop, Math.min(maxTop, top));
+
+        const px = Number.isFinite(pointerX) ? pointerX : (left + width);
+        const shouldDock = dockEnabled && (px >= vw - pointerMargin || (left + width) >= vw - edgeMargin);
+
+        const snappedEdges = [];
+        if (!shouldDock) {
+            if (left <= safeGutter + magnet) {
+                left = safeGutter;
+                snappedEdges.push('left');
+            }
+            if (top <= safeTop + magnet) {
+                top = safeTop;
+                snappedEdges.push('top');
+            } else if (vh - (top + height) <= safeGutter + magnet && maxTop >= safeTop) {
+                top = maxTop;
+                snappedEdges.push('bottom');
+            }
+        }
+
+        return {
+            shouldDock,
+            left: Math.round(left),
+            top: Math.round(top),
+            width,
+            height,
+            snappedEdges
+        };
+    }
+
+    function formatAgentInlineMarkdown(escapedLine) {
+        return String(escapedLine || '')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    }
+
+    function renderAgentFormattedText(el, rawText) {
+        if (!el) return;
+        const src = String(rawText || '');
+        if (!src) {
+            el.innerHTML = '';
+            return;
+        }
+        const parts = src.split(/```/);
+        const htmlParts = [];
+        for (let idx = 0; idx < parts.length; idx++) {
+            if (idx % 2 === 1) {
+                const code = parts[idx].replace(/^[a-zA-Z0-9_-]*\r?\n/, '');
+                htmlParts.push(`<pre class="sa-code-block"><code>${escapeHtml(code)}</code></pre>`);
+                continue;
+            }
+            const lines = parts[idx].split(/\r?\n/);
+            let inList = false;
+            let listTag = 'ul';
+            let paraLines = [];
+            const flushPara = () => {
+                if (!paraLines.length) return;
+                htmlParts.push(`<p>${paraLines.map(l => formatAgentInlineMarkdown(escapeHtml(l))).join('<br>')}</p>`);
+                paraLines = [];
+            };
+            const flushList = () => {
+                if (!inList) return;
+                htmlParts.push(`</${listTag}>`);
+                inList = false;
+            };
+            lines.forEach(line => {
+                const trimmed = line.trim();
+                const ulMatch = trimmed.match(/^[-•*]\s+(.+)$/);
+                const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+                if (!trimmed) {
+                    flushPara();
+                    flushList();
+                } else if (ulMatch) {
+                    flushPara();
+                    if (!inList || listTag !== 'ul') {
+                        flushList();
+                        htmlParts.push('<ul>');
+                        inList = true;
+                        listTag = 'ul';
+                    }
+                    htmlParts.push(`<li>${formatAgentInlineMarkdown(escapeHtml(ulMatch[1]))}</li>`);
+                } else if (olMatch) {
+                    flushPara();
+                    if (!inList || listTag !== 'ol') {
+                        flushList();
+                        htmlParts.push('<ol>');
+                        inList = true;
+                        listTag = 'ol';
+                    }
+                    htmlParts.push(`<li>${formatAgentInlineMarkdown(escapeHtml(olMatch[1]))}</li>`);
+                } else {
+                    flushList();
+                    paraLines.push(line);
+                }
+            });
+            flushPara();
+            flushList();
+        }
+        el.innerHTML = htmlParts.join('');
+    }
+    /* ===== End Pure Agent Helpers ===== */
+
     const gptInitial = readGptChatSettings();
     const savedAgent = readJsonStorage(AGENT_SETTINGS_KEY, {});
+    const initialFloatRect = (savedAgent.floatRect && typeof savedAgent.floatRect === 'object')
+        ? normalizeAgentFloatRect(savedAgent.floatRect)
+        : (savedAgent.panelPos && typeof savedAgent.panelPos === 'object' ? normalizeAgentFloatRect(savedAgent.panelPos) : null);
 
     const state = {
         open: Boolean(savedAgent.open),
+        layoutMode: savedAgent.layoutMode === 'floating' ? 'floating' : 'docked',
+        dockWidth: clampAgentDockWidth(savedAgent.dockWidth),
+        floatRect: initialFloatRect,
         sending: false,
         abortController: null,
         serverStreamSupported: null,
@@ -115,6 +294,8 @@
         skillIds: Array.isArray(savedAgent.skillIds)
             ? savedAgent.skillIds.map(String)
             : (Array.isArray(gptInitial.chatSkillIds) ? gptInitial.chatSkillIds.map(String) : []),
+        skillFilterTab: 'all',
+        skillSearchQuery: '',
         orbPos: savedAgent.orbPos || null,
         panelPos: savedAgent.panelPos || null,
         threads: [],
@@ -135,6 +316,9 @@
     function saveAgentSettings() {
         writeJsonStorage(AGENT_SETTINGS_KEY, {
             open: state.open,
+            layoutMode: state.layoutMode,
+            dockWidth: state.dockWidth,
+            floatRect: state.floatRect,
             chatProvider: state.chatProvider,
             chatModel: state.chatModel,
             imageProvider: state.imageProvider,
@@ -243,19 +427,13 @@
     }
 
     function effectiveSkillIds() {
-        if (state.promptSource === 'gpt') {
-            const latestGpt = readGptChatSettings();
-            if (Array.isArray(latestGpt.chatSkillIds) && latestGpt.chatSkillIds.length) {
-                return latestGpt.chatSkillIds.map(String);
-            }
-        }
         return Array.isArray(state.skillIds) ? state.skillIds : [];
     }
 
     function promptSourceLabel() {
         if (state.promptSource === 'gpt') {
             const latestGpt = readGptChatSettings();
-            if (String(latestGpt.systemPrompt || '').trim()) return '已同步：GPT 对话系统提示词';
+            if (String(latestGpt.systemPrompt || '').trim()) return '已同步：Agent智能改图系统提示词';
             const expert = allPromptLibraryPresets().find(p => /系统提示词/.test(p.name));
             return expert ? `自动带入：${expert.name}` : '默认创作系统提示词';
         }
@@ -1307,7 +1485,7 @@
         }, true);
     }
 
-    /* ===== Build DOM (Left Outline Panel + Floating Orb + Right Agent Panel) ===== */
+    /* ===== Build DOM (Left Outline Panel + Floating Orb + Right/Floating Agent Panel + Body Popover Portal) ===== */
     function mountAgentUI() {
         if (document.getElementById('smartAgentPanel')) return;
 
@@ -1354,31 +1532,48 @@
             <button type="button" class="sa-orb-btn" id="saOrbBtn" title="打开创作 Agent" aria-label="打开创作 Agent"></button>
         `;
 
-        // 3. LibTV-style Floating Agent Card
+        // 3. Magnetic Right-Edge Dock Snap Preview Overlay
+        const dockSnapZone = document.createElement('div');
+        dockSnapZone.id = 'saDockSnapZone';
+        dockSnapZone.className = 'sa-dock-snap-zone';
+        dockSnapZone.setAttribute('aria-hidden', 'true');
+        dockSnapZone.innerHTML = `
+            <div class="sa-dock-snap-badge">
+                <i data-lucide="panel-right"></i>
+                <span>松开以停靠到右侧</span>
+            </div>
+        `;
+
+        // 4. LibTV-style Agent Panel (Docked Right Sidebar <-> Floating Card)
         const panel = document.createElement('aside');
         panel.id = 'smartAgentPanel';
-        panel.className = 'sa-panel';
+        panel.className = 'sa-panel is-docked';
         panel.innerHTML = `
+            <div class="sa-dock-resize-handle" id="saDockResizeHandle" title="拖拽调整右侧停靠宽度"></div>
+            <div class="sa-float-resize-handle" id="saFloatResizeHandle" title="拖拽调整浮窗尺寸"></div>
             <header class="sa-header" id="saHeader">
                 <button type="button" class="sa-thread-btn" id="saThreadBtn" title="切换对话记录">
                     <span class="sa-thread-title" id="saThreadTitle">新对话</span>
                     <i data-lucide="chevron-down"></i>
                 </button>
                 <div class="sa-head-actions">
-                    <button type="button" class="sa-icon-btn" id="saNewChatBtn" title="新建对话">
-                        <i data-lucide="message-square-plus"></i>
+                    <button type="button" class="sa-icon-btn" id="saNewChatBtn" data-tip="新建对话" aria-label="新建对话">
+                        <i data-lucide="plus-circle"></i>
                     </button>
-                    <button type="button" class="sa-icon-btn" id="saClickRefToggleBtn" title="点击画布节点自动插入行内引用胶囊（点击可开关）">
+                    <button type="button" class="sa-icon-btn" id="saClickRefToggleBtn" data-tip="点选画布自动引用" aria-label="点选画布自动引用">
                         <i data-lucide="mouse-pointer-click"></i>
                     </button>
-                    <button type="button" class="sa-icon-btn" id="saSysBtn" title="Agent 系统提示词 & Skills">
+                    <button type="button" class="sa-icon-btn" id="saSysBtn" data-tip="系统提示词与设置" aria-label="系统提示词与设置">
                         <i data-lucide="sliders-horizontal"></i>
                         <span class="sa-icon-dot"></span>
                     </button>
-                    <button type="button" class="sa-icon-btn" id="saFocusCanvasBtn" title="适配画布全局视图">
+                    <button type="button" class="sa-icon-btn" id="saFocusCanvasBtn" data-tip="适配画布视图" aria-label="适配画布视图">
                         <i data-lucide="scan-eye"></i>
                     </button>
-                    <button type="button" class="sa-icon-btn" id="saMinimizeBtn" title="收起为悬浮球">
+                    <button type="button" class="sa-icon-btn" id="saDockToggleBtn" data-tip="切换为浮窗" data-tip-align="right" aria-label="切换为浮窗">
+                        <i data-lucide="picture-in-picture-2"></i>
+                    </button>
+                    <button type="button" class="sa-icon-btn" id="saMinimizeBtn" data-tip="收起为悬浮球" data-tip-align="right" aria-label="收起为悬浮球">
                         <i data-lucide="minus"></i>
                     </button>
                 </div>
@@ -1403,20 +1598,24 @@
                 </div>
                 <div class="sa-drawer-body">
                     <div class="sa-sys-source-row">
-                        <span class="sa-sys-badge" id="saSysSourceBadge">已同步：GPT 对话</span>
+                        <span class="sa-sys-badge" id="saSysSourceBadge">已同步：Agent智能改图</span>
                         <div style="display:flex;gap:6px;">
-                            <button type="button" class="sa-mini-btn" id="saSyncFromGptBtn">同步 GPT 对话</button>
+                            <button type="button" class="sa-mini-btn" id="saSyncFromGptBtn">同步智能改图</button>
                             <button type="button" class="sa-mini-btn" id="saSkillManageBtn">管理 Skills</button>
                         </div>
                     </div>
-                    <textarea class="sa-sys-textarea" id="saSysTextarea" placeholder="带入 GPT 对话的 Agent 系统提示词，或在此微调…"></textarea>
+                    <div class="sa-sys-preset-section" hidden>
+                        <div class="sa-sys-preset-label">预设系统提示词</div>
+                        <div class="sa-preset-strip" id="saPresetStrip"></div>
+                    </div>
+                    <textarea class="sa-sys-textarea" id="saSysTextarea" placeholder="带入 Agent智能改图 的系统提示词，或在此微调…"></textarea>
                     <div class="sa-skill-row">
                         <select id="saSkillSelect" class="sa-skill-select" multiple size="3" aria-label="选择 Skills"></select>
                     </div>
                     <div style="display:flex;justify-content:space-between;gap:8px;">
                         <button type="button" class="sa-mini-btn" id="saSysClearBtn">清空</button>
                         <div style="display:flex;gap:6px;">
-                            <button type="button" class="sa-mini-btn" id="saSysSaveToGptBtn">保存并同步到 GPT</button>
+                            <button type="button" class="sa-mini-btn" id="saSysSaveToGptBtn">保存并同步到智能改图</button>
                             <button type="button" class="sa-mini-btn primary" id="saSysSaveBtn">应用到画布</button>
                         </div>
                     </div>
@@ -1426,74 +1625,31 @@
             <!-- Messages Stream -->
             <div class="sa-body" id="saMessages"></div>
 
-            <!-- System Prompt Preset Capsules -->
-            <div class="sa-preset-strip" id="saPresetStrip"></div>
-
             <!-- Rich Inline-Token Input Composer -->
             <div class="sa-composer-wrap">
-                <!-- @Mention All-Node Picker -->
-                <div class="sa-popover" id="saMentionPopover">
-                    <div class="sa-pop-head">
-                        <span id="saMentionHeadTitle">引用画布节点</span>
-                        <button type="button" class="sa-icon-btn" id="saMentionCloseBtn" style="width:22px;height:22px;"><i data-lucide="x"></i></button>
-                    </div>
-                    <div class="sa-mention-search-wrap">
-                        <input type="search" class="sa-mention-search" id="saMentionSearch" placeholder="搜索节点名称、提示词或序号…">
-                    </div>
-                    <div class="sa-mention-scroll" id="saMentionList"></div>
-                </div>
-
-                <!-- Model Picker Popover (with Multi-Model Parallel Compare!) -->
-                <div class="sa-popover" id="saModelPopover">
-                    <div class="sa-pop-head">
-                        <span>模型选择</span>
-                        <div class="sa-scope-tabs">
-                            <button type="button" id="saScopeImageBtn" class="active">生图模型</button>
-                            <button type="button" id="saScopeChatBtn">对话大脑</button>
-                        </div>
-                    </div>
-                    <div class="sa-compare-bar" id="saCompareBar">
-                        <span>勾选多个模型可并排建节点同时对比出图</span>
-                        <button type="button" class="sa-compare-toggle" id="saCompareToggleBtn">多模型对比</button>
-                    </div>
-                    <div class="sa-model-grid">
-                        <div class="sa-pop-list" id="saProviderList"></div>
-                        <div class="sa-pop-list" id="saModelList"></div>
-                    </div>
-                </div>
-
-                <!-- Resolution & Aspect Ratio Popover -->
-                <div class="sa-popover" id="saSizePopover">
-                    <div class="sa-pop-head">
-                        <span>比例与分辨率尺寸</span>
-                        <div class="sa-scope-tabs">
-                            <button type="button" data-size-mode="auto" class="active">自动</button>
-                            <button type="button" data-size-mode="preset">内置尺寸</button>
-                            <button type="button" data-size-mode="custom">自定义</button>
-                        </div>
-                    </div>
-                    <div class="sa-size-body" id="saSizeBody"></div>
-                </div>
-
                 <div class="sa-composer" id="saComposerBox">
                     <div id="saRichInput" class="sa-rich-input" contenteditable="true" spellcheck="false" data-placeholder="开始你的创作，直接点击画布节点或输入 @ 插入节点引用…"></div>
                     <input id="saUploadInput" type="file" accept="image/*,video/*" multiple hidden>
                     <div class="sa-toolbar">
                         <div class="sa-tools-left">
-                            <button type="button" class="sa-tool-btn icon-only" id="saUploadBtn" title="上传参考图到画布并插入行内引用">
+                            <button type="button" class="sa-tool-btn icon-only" id="saUploadBtn" title="上传参考图或引用画布节点">
                                 <i data-lucide="plus"></i>
                             </button>
                             <button type="button" class="sa-tool-btn" id="saModelBtn" title="选择对话大脑与生图模型（支持多模型并排对比）">
                                 <i data-lucide="box"></i>
                                 <span class="sa-tool-label" id="saModelBtnLabel">模型</span>
                             </button>
+                            <button type="button" class="sa-tool-btn" id="saSkillBtn" title="Skill 与提示词预设" aria-label="Skill 与提示词预设">
+                                <i data-lucide="book-marked"></i>
+                                <span class="sa-tool-badge" id="saSkillBadgeCount"></span>
+                            </button>
                             <button type="button" class="sa-tool-btn" id="saSizeBtn" title="选择生图比例与分辨率尺寸">
                                 <i data-lucide="proportions"></i>
                                 <span class="sa-tool-label" id="saSizeBtnLabel">自动尺寸</span>
                             </button>
-                            <button type="button" class="sa-tool-btn active" id="saAutoRunBtn" title="新建生图节点后自动开始生图（点击切换仅建节点）">
-                                <i data-lucide="sparkles"></i>
-                                <span id="saAutoRunLabel">自动生图</span>
+                            <button type="button" class="sa-tool-btn active" id="saAutoRunBtn" title="切换手动生成 / 自动生成模式">
+                                <span class="sa-mode-btn-icon" id="saAutoRunIconWrap"><i data-lucide="refresh-cw"></i></span>
+                                <span class="sa-tool-label" id="saAutoRunLabel">自动生成</span>
                             </button>
                         </div>
                         <button type="button" class="sa-send-btn" id="saSendBtn" title="发送">
@@ -1504,10 +1660,118 @@
             </div>
         `;
 
+        // 5. Body-Level Fixed Popover Portal (Zero Clipping — LibTV Exact Style)
+        const popoverPortal = document.createElement('div');
+        popoverPortal.id = 'saPopoverPortal';
+        popoverPortal.className = 'sa-popover-portal';
+        popoverPortal.innerHTML = `
+            <!-- Popover 1: + Attachment / Mention Menu -->
+            <div class="sa-popover sa-attach-popover" id="saAttachPopover">
+                <button type="button" class="sa-menu-row-btn" id="saAttachLocalBtn">
+                    <i data-lucide="image-plus"></i><span>本地上传图片 / 视频</span>
+                </button>
+                <button type="button" class="sa-menu-row-btn" id="saAttachMentionBtn">
+                    <i data-lucide="at-sign"></i><span>引用画布节点 (@)</span>
+                </button>
+            </div>
+
+            <!-- Popover 2: Model Picker (LibTV Card List + Multi-Model Compare) -->
+            <div class="sa-popover sa-model-popover" id="saModelPopover">
+                <div class="sa-pop-title-lg">
+                    <span>选择模型</span>
+                    <button type="button" class="sa-compare-toggle" id="saCompareToggleBtn">多模型对比</button>
+                </div>
+                <div class="sa-scope-tabs-full">
+                    <button type="button" id="saScopeImageBtn" class="active">生图模型</button>
+                    <button type="button" id="saScopeChatBtn">对话大脑</button>
+                </div>
+                <div class="sa-provider-pills" id="saProviderList"></div>
+                <div class="sa-compare-bar" id="saCompareBar">
+                    <span>勾选多个模型可并排建节点同时对比出图</span>
+                </div>
+                <div class="sa-model-cards-list" id="saModelList"></div>
+            </div>
+
+            <!-- Popover 3: Skill & Prompt Presets (LibTV Screenshot 3) -->
+            <div class="sa-popover sa-skill-popover" id="saSkillPopover">
+                <div class="sa-skill-pop-head">
+                    <div class="sa-skill-pop-title">Skill</div>
+                    <div class="sa-skill-pop-actions">
+                        <button type="button" class="sa-skill-head-btn" id="saSkillCreateBtn">
+                            <i data-lucide="plus"></i><span>创建</span>
+                        </button>
+                        <button type="button" class="sa-skill-head-btn" id="saSkillSysBtn">
+                            <span>系统词</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="sa-skill-filter-bar">
+                    <div class="sa-skill-tabs" id="saSkillFilterTabs">
+                        <button type="button" class="sa-skill-tab-btn active" data-stab="all">全部</button>
+                        <button type="button" class="sa-skill-tab-btn" data-stab="skills">Skills</button>
+                        <button type="button" class="sa-skill-tab-btn" data-stab="presets">预设词</button>
+                        <button type="button" class="sa-skill-tab-btn" data-stab="active">已启用</button>
+                    </div>
+                    <div class="sa-skill-search-wrap">
+                        <i data-lucide="search"></i>
+                        <input id="saSkillSearchInput" class="sa-skill-search-input" type="search" placeholder="搜索 Skill">
+                    </div>
+                </div>
+                <div class="sa-skill-items-list" id="saSkillItemsList"></div>
+            </div>
+
+            <!-- Popover 4: Execution Mode Menu (手动生成 / 自动生成 — LibTV Screenshot 4) -->
+            <div class="sa-popover sa-mode-popover" id="saModePopover">
+                <button type="button" class="sa-mode-option-btn" id="saModeOptManual" data-auto-mode="manual">
+                    <i class="sa-mode-opt-icon" data-lucide="hand"></i>
+                    <div>
+                        <div class="sa-mode-opt-title">手动生成</div>
+                        <div class="sa-mode-opt-desc">仅在画布创建并连线生图节点，确认后再运行</div>
+                    </div>
+                    <i class="sa-mode-opt-check" data-lucide="check"></i>
+                </button>
+                <button type="button" class="sa-mode-option-btn" id="saModeOptAuto" data-auto-mode="auto">
+                    <i class="sa-mode-opt-icon" data-lucide="refresh-cw"></i>
+                    <div>
+                        <div class="sa-mode-opt-title">自动生成</div>
+                        <div class="sa-mode-opt-desc">创建生图节点后自动提交并开始出图</div>
+                    </div>
+                    <i class="sa-mode-opt-check" data-lucide="check"></i>
+                </button>
+            </div>
+
+            <!-- Popover 5: Resolution & Aspect Ratio -->
+            <div class="sa-popover" id="saSizePopover">
+                <div class="sa-pop-head">
+                    <span>比例与分辨率尺寸</span>
+                    <div class="sa-scope-tabs">
+                        <button type="button" data-size-mode="auto" class="active">自动</button>
+                        <button type="button" data-size-mode="preset">内置尺寸</button>
+                        <button type="button" data-size-mode="custom">自定义</button>
+                    </div>
+                </div>
+                <div class="sa-size-body" id="saSizeBody"></div>
+            </div>
+
+            <!-- Popover 6: @Mention All-Node Picker -->
+            <div class="sa-popover" id="saMentionPopover">
+                <div class="sa-pop-head">
+                    <span id="saMentionHeadTitle">引用画布节点</span>
+                    <button type="button" class="sa-icon-btn" id="saMentionCloseBtn" style="width:22px;height:22px;"><i data-lucide="x"></i></button>
+                </div>
+                <div class="sa-mention-search-wrap">
+                    <input type="search" class="sa-mention-search" id="saMentionSearch" placeholder="搜索节点名称、提示词或序号…">
+                </div>
+                <div class="sa-mention-scroll" id="saMentionList"></div>
+            </div>
+        `;
+
         document.body.appendChild(outlineBtn);
         document.body.appendChild(outlinePanel);
         document.body.appendChild(orbWrap);
+        document.body.appendChild(dockSnapZone);
         document.body.appendChild(panel);
+        document.body.appendChild(popoverPortal);
 
         els = {
             outlineBtn,
@@ -1522,7 +1786,10 @@
             outlineList: document.getElementById('saOutlineList'),
             orbWrap,
             orbBtn: document.getElementById('saOrbBtn'),
+            dockSnapZone,
             panel,
+            dockResizeHandle: document.getElementById('saDockResizeHandle'),
+            floatResizeHandle: document.getElementById('saFloatResizeHandle'),
             header: document.getElementById('saHeader'),
             threadBtn: document.getElementById('saThreadBtn'),
             threadTitle: document.getElementById('saThreadTitle'),
@@ -1530,6 +1797,7 @@
             clickRefToggleBtn: document.getElementById('saClickRefToggleBtn'),
             sysBtn: document.getElementById('saSysBtn'),
             focusCanvasBtn: document.getElementById('saFocusCanvasBtn'),
+            dockToggleBtn: document.getElementById('saDockToggleBtn'),
             minimizeBtn: document.getElementById('saMinimizeBtn'),
             historyDrawer: document.getElementById('saHistoryDrawer'),
             historyClose: document.getElementById('saHistoryClose'),
@@ -1546,6 +1814,10 @@
             sysSaveBtn: document.getElementById('saSysSaveBtn'),
             messages: document.getElementById('saMessages'),
             presetStrip: document.getElementById('saPresetStrip'),
+            popoverPortal,
+            attachPopover: document.getElementById('saAttachPopover'),
+            attachLocalBtn: document.getElementById('saAttachLocalBtn'),
+            attachMentionBtn: document.getElementById('saAttachMentionBtn'),
             mentionPopover: document.getElementById('saMentionPopover'),
             mentionHeadTitle: document.getElementById('saMentionHeadTitle'),
             mentionCloseBtn: document.getElementById('saMentionCloseBtn'),
@@ -1558,6 +1830,15 @@
             compareToggleBtn: document.getElementById('saCompareToggleBtn'),
             providerList: document.getElementById('saProviderList'),
             modelList: document.getElementById('saModelList'),
+            skillPopover: document.getElementById('saSkillPopover'),
+            skillCreateBtn: document.getElementById('saSkillCreateBtn'),
+            skillSysBtn: document.getElementById('saSkillSysBtn'),
+            skillFilterTabs: document.getElementById('saSkillFilterTabs'),
+            skillSearchInput: document.getElementById('saSkillSearchInput'),
+            skillItemsList: document.getElementById('saSkillItemsList'),
+            modePopover: document.getElementById('saModePopover'),
+            modeOptManual: document.getElementById('saModeOptManual'),
+            modeOptAuto: document.getElementById('saModeOptAuto'),
             sizePopover: document.getElementById('saSizePopover'),
             sizeBody: document.getElementById('saSizeBody'),
             composerBox: document.getElementById('saComposerBox'),
@@ -1566,15 +1847,19 @@
             uploadBtn: document.getElementById('saUploadBtn'),
             modelBtn: document.getElementById('saModelBtn'),
             modelBtnLabel: document.getElementById('saModelBtnLabel'),
+            skillBtn: document.getElementById('saSkillBtn'),
+            skillBadgeCount: document.getElementById('saSkillBadgeCount'),
             sizeBtn: document.getElementById('saSizeBtn'),
             sizeBtnLabel: document.getElementById('saSizeBtnLabel'),
             autoRunBtn: document.getElementById('saAutoRunBtn'),
+            autoRunIconWrap: document.getElementById('saAutoRunIconWrap'),
             autoRunLabel: document.getElementById('saAutoRunLabel'),
             sendBtn: document.getElementById('saSendBtn')
         };
 
-        [outlineBtn, outlinePanel, orbWrap, panel].forEach(root => {
+        [outlineBtn, outlinePanel, orbWrap, panel, popoverPortal].forEach(root => {
             root.addEventListener('mousedown', e => e.stopPropagation());
+            root.addEventListener('pointerdown', e => e.stopPropagation());
             root.addEventListener('dblclick', e => e.stopPropagation());
             root.addEventListener('wheel', e => e.stopPropagation(), { passive: true });
         });
@@ -1657,13 +1942,66 @@
             els.orbWrap.style.right = 'auto';
             els.orbWrap.style.bottom = 'auto';
         }
-        if (state.panelPos && Number.isFinite(state.panelPos.left) && Number.isFinite(state.panelPos.top)) {
-            const w = els.panel.offsetWidth || 416;
-            const left = Math.max(10, Math.min(window.innerWidth - w - 10, state.panelPos.left));
-            const top = Math.max(10, Math.min(window.innerHeight - 200, state.panelPos.top));
-            els.panel.style.left = `${left}px`;
-            els.panel.style.top = `${top}px`;
+        syncPanelLayoutUi(false);
+    }
+
+    function syncPanelLayoutUi(animate = false) {
+        if (!els.panel) return;
+        const dockW = clampAgentDockWidth(state.dockWidth);
+        state.dockWidth = dockW;
+        document.documentElement.style.setProperty('--sa-dock-width', `${dockW}px`);
+
+        const isDocked = state.layoutMode !== 'floating';
+        if (animate) {
+            els.panel.classList.add('is-morphing');
+            clearTimeout(els.panel._morphTimer);
+            els.panel._morphTimer = setTimeout(() => els.panel?.classList.remove('is-morphing'), 260);
+        }
+
+        els.panel.classList.toggle('is-docked', isDocked);
+        els.panel.classList.toggle('is-floating', !isDocked);
+        document.body.classList.toggle('sa-panel-docked-open', Boolean(state.open && isDocked && window.innerWidth > 720));
+
+        if (isDocked) {
+            els.panel.style.left = '';
+            els.panel.style.top = '';
+            els.panel.style.width = '';
+            els.panel.style.height = '';
+            els.panel.style.right = '';
+            els.panel.style.bottom = '';
+        } else {
+            const r = normalizeAgentFloatRect(state.floatRect);
+            state.floatRect = r;
+            els.panel.style.left = `${r.left}px`;
+            els.panel.style.top = `${r.top}px`;
+            els.panel.style.width = `${r.width}px`;
+            els.panel.style.height = `${r.height}px`;
             els.panel.style.right = 'auto';
+            els.panel.style.bottom = 'auto';
+        }
+
+        if (els.dockToggleBtn) {
+            const nextTip = isDocked ? '切换为浮窗' : '停靠到右侧';
+            const nextIcon = isDocked ? 'picture-in-picture-2' : 'panel-right';
+            els.dockToggleBtn.setAttribute('data-tip', nextTip);
+            els.dockToggleBtn.setAttribute('aria-label', nextTip);
+            els.dockToggleBtn.innerHTML = `<i data-lucide="${nextIcon}"></i>`;
+            if (window.lucide) lucide.createIcons({ nodes: [els.dockToggleBtn] });
+        }
+    }
+
+    function setPanelLayoutMode(nextMode, options = {}) {
+        const target = nextMode === 'floating' ? 'floating' : 'docked';
+        const prev = state.layoutMode;
+        closeAllAgentPopovers();
+        if (target === 'floating' && !state.floatRect) {
+            state.floatRect = normalizeAgentFloatRect(null);
+        }
+        state.layoutMode = target;
+        syncPanelLayoutUi(options.animate !== false && prev !== target);
+        saveAgentSettings();
+        if (options.toast !== false && prev !== target && typeof toast === 'function') {
+            toast(target === 'docked' ? '已停靠到画布右侧' : '已切换为可拖拽浮窗卡片');
         }
     }
 
@@ -1671,6 +2009,7 @@
         els.panel.classList.toggle('open', state.open);
         els.orbWrap.classList.toggle('is-hidden', state.open);
         els.clickRefToggleBtn?.classList.toggle('active', state.clickToRef);
+        syncPanelLayoutUi(false);
         if (state.open) {
             renderPresetStrip();
             updateToolbarLabels();
@@ -1688,13 +2027,74 @@
         }
     }
 
-    function closeAllAgentPopovers() {
-        els.modelPopover?.classList.remove('open');
-        els.sizePopover?.classList.remove('open');
-        els.mentionPopover?.classList.remove('open');
-        els.historyDrawer?.classList.remove('open');
-        els.sysDrawer?.classList.remove('open');
-        state.mentionOpen = false;
+    const AGENT_POPOVERS = [
+        { key: 'attach', btn: 'uploadBtn', pop: 'attachPopover', width: 196, maxHeight: 130 },
+        { key: 'model', btn: 'modelBtn', pop: 'modelPopover', width: 396, maxHeight: 455 },
+        { key: 'skill', btn: 'skillBtn', pop: 'skillPopover', width: 420, maxHeight: 430 },
+        { key: 'size', btn: 'sizeBtn', pop: 'sizePopover', width: 344, maxHeight: 340 },
+        { key: 'mode', btn: 'autoRunBtn', pop: 'modePopover', width: 268, maxHeight: 200 },
+        { key: 'mention', btn: 'composerBox', pop: 'mentionPopover', width: 356, maxHeight: 350 }
+    ];
+
+    function positionAgentPopover(triggerEl, popEl, opts = {}) {
+        if (!popEl) return;
+        const anchor = triggerEl || els.composerBox || els.panel;
+        if (!anchor) return;
+        const rect = anchor.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const width = Math.min(opts.width || 340, Math.max(180, vw - 24));
+        const availAbove = Math.max(140, rect.top - 16);
+        const maxHeight = Math.min(opts.maxHeight || 430, availAbove, vh - 32);
+        const left = Math.max(12, Math.min(vw - width - 12, rect.left));
+
+        popEl.style.setProperty('--sa-pop-width', `${Math.round(width)}px`);
+        popEl.style.setProperty('--sa-pop-max-height', `${Math.round(maxHeight)}px`);
+        popEl.style.setProperty('--sa-pop-left', `${Math.round(left)}px`);
+        popEl.style.setProperty('--sa-pop-top', `${Math.max(12, Math.round(rect.top - maxHeight - 8))}px`);
+
+        requestAnimationFrame(() => {
+            if (!popEl.classList.contains('open')) return;
+            const box = popEl.getBoundingClientRect();
+            const actualH = Math.min(maxHeight, Math.ceil(box.height || popEl.scrollHeight || 160));
+            const nextTop = rect.top - actualH - 8 >= 12
+                ? rect.top - actualH - 8
+                : Math.min(vh - actualH - 12, rect.bottom + 8);
+            popEl.style.setProperty('--sa-pop-top', `${Math.max(12, Math.round(nextTop))}px`);
+        });
+    }
+
+    function closeAllAgentPopovers(exceptPopId = '') {
+        AGENT_POPOVERS.forEach(item => {
+            const popEl = els[item.pop];
+            const btnEl = els[item.btn];
+            if (popEl && popEl.id === exceptPopId) return;
+            popEl?.classList.remove('open');
+            if (item.btn !== 'composerBox') btnEl?.classList.remove('open');
+        });
+        if (exceptPopId !== 'saHistoryDrawer') els.historyDrawer?.classList.remove('open');
+        if (exceptPopId !== 'saSysDrawer') els.sysDrawer?.classList.remove('open');
+        if (exceptPopId !== 'saMentionPopover') state.mentionOpen = false;
+    }
+
+    function toggleAgentComposerPopover(key, force) {
+        const cfg = AGENT_POPOVERS.find(it => it.key === key);
+        if (!cfg) return false;
+        const btnEl = els[cfg.btn];
+        const popEl = els[cfg.pop];
+        if (!popEl) return false;
+        const shouldOpen = typeof force === 'boolean' ? force : !popEl.classList.contains('open');
+        if (shouldOpen) {
+            closeAllAgentPopovers(popEl.id);
+            if (cfg.btn !== 'composerBox') btnEl?.classList.add('open');
+            popEl.classList.add('open');
+            positionAgentPopover(btnEl, popEl, cfg);
+            if (window.lucide) lucide.createIcons({ nodes: [popEl] });
+        } else {
+            if (cfg.btn !== 'composerBox') btnEl?.classList.remove('open');
+            popEl.classList.remove('open');
+        }
+        return shouldOpen;
     }
 
     /* ===== Node Outline & Cmd+F Global Search Rendering ===== */
@@ -1793,7 +2193,7 @@
         });
     }
 
-    /* ===== Dragging Orb & Panel Header ===== */
+    /* ===== Dragging Orb, Floating Card Magnetic Snap & Dock Tear-Off + Resizers ===== */
     function bindDraggable(handleEl, targetEl, onClickWithoutMove, onSavePos) {
         handleEl.addEventListener('mousedown', e => {
             if (e.button !== 0) return;
@@ -1823,6 +2223,190 @@
                 } else {
                     onClickWithoutMove?.();
                 }
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    }
+
+    function bindAgentPanelDragAndSnap() {
+        els.header.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            if (e.target.closest('button')) return;
+            if (window.innerWidth <= 720) return;
+
+            const startRect = els.panel.getBoundingClientRect();
+            const startX = e.clientX;
+            const startY = e.clientY;
+            let dragMode = state.layoutMode === 'floating' ? 'floating' : 'docked';
+            let dragRect = {
+                left: startRect.left,
+                top: startRect.top,
+                width: startRect.width,
+                height: startRect.height
+            };
+            let moved = false;
+            let lastSnap = null;
+
+            const onMove = ev => {
+                const dx = ev.clientX - startX;
+                const dy = ev.clientY - startY;
+                if (!moved && Math.hypot(dx, dy) <= 5) return;
+
+                if (dragMode === 'docked') {
+                    // Tear off seamlessly into floating card when dragged away from right edge
+                    if (dx <= -32 || Math.hypot(dx, dy) >= 42) {
+                        moved = true;
+                        closeAllAgentPopovers();
+                        const baseFloat = normalizeAgentFloatRect(state.floatRect);
+                        const relX = Math.max(0.15, Math.min(0.85, (startX - startRect.left) / Math.max(1, startRect.width)));
+                        const relY = Math.max(10, Math.min(36, startY - startRect.top));
+                        const initialLeft = Math.max(12, Math.min(window.innerWidth - baseFloat.width - 12, ev.clientX - relX * baseFloat.width));
+                        const initialTop = Math.max(56, Math.min(window.innerHeight - baseFloat.height - 14, ev.clientY - relY));
+
+                        dragMode = 'floating';
+                        state.layoutMode = 'floating';
+                        document.body.classList.remove('sa-panel-docked-open');
+                        els.panel.classList.remove('is-docked');
+                        els.panel.classList.add('is-floating', 'is-dragging');
+                        els.panel.style.width = `${baseFloat.width}px`;
+                        els.panel.style.height = `${baseFloat.height}px`;
+                        els.panel.style.right = 'auto';
+                        els.panel.style.bottom = 'auto';
+                        dragRect = {
+                            left: initialLeft - dx,
+                            top: initialTop - dy,
+                            width: baseFloat.width,
+                            height: baseFloat.height
+                        };
+                    } else {
+                        return;
+                    }
+                } else if (!moved) {
+                    moved = true;
+                    closeAllAgentPopovers();
+                    els.panel.classList.add('is-dragging');
+                }
+
+                const rawLeft = dragRect.left + dx;
+                const rawTop = dragRect.top + dy;
+                const clampedLeft = Math.max(8, Math.min(window.innerWidth - dragRect.width - 8, rawLeft));
+                const clampedTop = Math.max(56, Math.min(window.innerHeight - dragRect.height - 10, rawTop));
+
+                els.panel.style.left = `${Math.round(clampedLeft)}px`;
+                els.panel.style.top = `${Math.round(clampedTop)}px`;
+
+                lastSnap = computeAgentFloatSnap(
+                    { left: clampedLeft, top: clampedTop, width: dragRect.width, height: dragRect.height },
+                    ev.clientX,
+                    window.innerWidth,
+                    window.innerHeight
+                );
+                els.dockSnapZone.classList.toggle('visible', lastSnap.shouldDock);
+                els.panel.classList.toggle('is-snap-primed', lastSnap.shouldDock);
+            };
+
+            const onUp = ev => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                els.panel.classList.remove('is-dragging', 'is-snap-primed');
+                els.dockSnapZone.classList.remove('visible');
+
+                if (!moved) return;
+
+                if (dragMode === 'floating') {
+                    const finalRect = els.panel.getBoundingClientRect();
+                    const snap = lastSnap || computeAgentFloatSnap(
+                        { left: finalRect.left, top: finalRect.top, width: dragRect.width, height: dragRect.height },
+                        ev.clientX,
+                        window.innerWidth,
+                        window.innerHeight
+                    );
+                    if (snap.shouldDock) {
+                        setPanelLayoutMode('docked', { animate: true, toast: true });
+                    } else {
+                        state.layoutMode = 'floating';
+                        state.floatRect = {
+                            left: snap.left,
+                            top: snap.top,
+                            width: snap.width,
+                            height: snap.height
+                        };
+                        syncPanelLayoutUi(true);
+                        saveAgentSettings();
+                    }
+                }
+            };
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+
+        els.header.addEventListener('dblclick', e => {
+            if (e.target.closest('button')) return;
+            setPanelLayoutMode(state.layoutMode === 'docked' ? 'floating' : 'docked', { animate: true, toast: true });
+        });
+    }
+
+    function bindAgentPanelResizers() {
+        els.dockResizeHandle?.addEventListener('mousedown', e => {
+            if (e.button !== 0 || state.layoutMode !== 'docked') return;
+            e.preventDefault();
+            e.stopPropagation();
+            closeAllAgentPopovers();
+            const startX = e.clientX;
+            const startW = state.dockWidth;
+            els.dockResizeHandle.classList.add('active');
+            els.panel.classList.add('is-dragging');
+
+            const onMove = ev => {
+                const maxAllowed = Math.min(AGENT_LAYOUT_DEFAULTS.dockWidthMax, Math.max(AGENT_LAYOUT_DEFAULTS.dockWidthMin, window.innerWidth - 280));
+                const nextW = Math.round(Math.max(AGENT_LAYOUT_DEFAULTS.dockWidthMin, Math.min(maxAllowed, startW + (startX - ev.clientX))));
+                state.dockWidth = nextW;
+                document.documentElement.style.setProperty('--sa-dock-width', `${nextW}px`);
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                els.dockResizeHandle.classList.remove('active');
+                els.panel.classList.remove('is-dragging');
+                saveAgentSettings();
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+
+        els.floatResizeHandle?.addEventListener('mousedown', e => {
+            if (e.button !== 0 || state.layoutMode !== 'floating') return;
+            e.preventDefault();
+            e.stopPropagation();
+            closeAllAgentPopovers();
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const rect = els.panel.getBoundingClientRect();
+            els.panel.classList.add('is-dragging');
+
+            const onMove = ev => {
+                const maxW = Math.min(AGENT_LAYOUT_DEFAULTS.floatMaxW, window.innerWidth - rect.left - 12);
+                const maxH = window.innerHeight - rect.top - 12;
+                const nextW = Math.round(Math.max(AGENT_LAYOUT_DEFAULTS.floatMinW, Math.min(maxW, rect.width + (ev.clientX - startX))));
+                const nextH = Math.round(Math.max(AGENT_LAYOUT_DEFAULTS.floatMinH, Math.min(maxH, rect.height + (ev.clientY - startY))));
+                els.panel.style.width = `${nextW}px`;
+                els.panel.style.height = `${nextH}px`;
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                els.panel.classList.remove('is-dragging');
+                const finalRect = els.panel.getBoundingClientRect();
+                state.floatRect = normalizeAgentFloatRect({
+                    left: finalRect.left,
+                    top: finalRect.top,
+                    width: finalRect.width,
+                    height: finalRect.height
+                });
+                syncPanelLayoutUi(false);
+                saveAgentSettings();
             };
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
@@ -1859,12 +2443,12 @@
             () => setAgentOpen(true),
             pos => { state.orbPos = pos; saveAgentSettings(); }
         );
-        bindDraggable(
-            els.header,
-            els.panel,
-            null,
-            pos => { state.panelPos = pos; saveAgentSettings(); }
-        );
+        bindAgentPanelDragAndSnap();
+        bindAgentPanelResizers();
+
+        els.dockToggleBtn.onclick = () => {
+            setPanelLayoutMode(state.layoutMode === 'docked' ? 'floating' : 'docked', { animate: true, toast: true });
+        };
 
         els.minimizeBtn.onclick = () => setAgentOpen(false);
 
@@ -1917,8 +2501,8 @@
             if (window.LLMSkills && els.skillSelect) window.LLMSkills.refreshSelect(els.skillSelect, state.skillIds);
             saveAgentSettings();
             renderPresetStrip();
-            updateSysIndicator();
-            if (typeof toast === 'function') toast('已同步 GPT 对话中的 Agent 系统提示词');
+            updateToolbarLabels();
+            if (typeof toast === 'function') toast('已同步 Agent智能改图 中的系统提示词');
         };
 
         els.skillManageBtn.onclick = () => {
@@ -1929,6 +2513,8 @@
                     state.skillIds = ids;
                     saveAgentSettings();
                     window.LLMSkills.refreshSelect(els.skillSelect, state.skillIds);
+                    updateToolbarLabels();
+                    if (els.skillPopover?.classList.contains('open')) renderSkillPopover();
                 }
             });
         };
@@ -1946,13 +2532,21 @@
         els.sysSaveBtn.onclick = () => {
             const val = els.sysTextarea.value.trim();
             const gptVal = String(readGptChatSettings().systemPrompt || '').trim();
-            state.promptSource = (val === gptVal && gptVal) ? 'gpt' : 'custom';
-            state.customSystemPrompt = val;
+            const currentExpected = String(effectiveAgentSystemPrompt() || '').trim();
+            if (state.promptSource.startsWith('preset:') && val === currentExpected) {
+                // Keep preset selection intact when user applies without changing preset text
+            } else if (val === gptVal && gptVal) {
+                state.promptSource = 'gpt';
+                state.customSystemPrompt = val;
+            } else {
+                state.promptSource = 'custom';
+                state.customSystemPrompt = val;
+            }
             if (els.skillSelect) state.skillIds = [...els.skillSelect.selectedOptions].map(o => o.value);
             saveAgentSettings();
             els.sysDrawer.classList.remove('open');
             renderPresetStrip();
-            updateSysIndicator();
+            updateToolbarLabels();
             if (typeof toast === 'function') toast('Agent 系统提示词已应用');
         };
 
@@ -1970,8 +2564,8 @@
             saveAgentSettings();
             els.sysDrawer.classList.remove('open');
             renderPresetStrip();
-            updateSysIndicator();
-            if (typeof toast === 'function') toast('已保存并同步到 GPT 对话');
+            updateToolbarLabels();
+            if (typeof toast === 'function') toast('已保存并同步到 Agent智能改图');
         };
 
         // Mention Search inside Popover
@@ -2000,8 +2594,26 @@
             }
         });
 
-        // Toolbar controls
-        els.uploadBtn.onclick = () => els.uploadInput.click();
+        // Toolbar controls & Portal Popovers
+        els.uploadBtn.onclick = e => {
+            e.stopPropagation();
+            toggleAgentComposerPopover('attach');
+        };
+        els.attachLocalBtn.onclick = () => {
+            closeAllAgentPopovers();
+            els.uploadInput.click();
+        };
+        els.attachMentionBtn.onclick = () => {
+            closeAllAgentPopovers();
+            state.mentionAtRange = null;
+            state.mentionQuery = '';
+            state.mentionOpen = true;
+            state.mentionActiveIdx = 0;
+            if (els.mentionSearch) els.mentionSearch.value = '';
+            renderMentionMenu();
+            setTimeout(() => els.mentionSearch?.focus(), 30);
+        };
+
         els.uploadInput.onchange = () => {
             if (els.uploadInput.files?.length) {
                 uploadFilesIntoCanvasAndAgent([...els.uploadInput.files]);
@@ -2009,13 +2621,9 @@
             }
         };
 
-        els.modelBtn.onclick = () => {
-            const opening = !els.modelPopover.classList.contains('open');
-            closeAllAgentPopovers();
-            if (opening) {
-                renderModelPopover();
-                els.modelPopover.classList.add('open');
-            }
+        els.modelBtn.onclick = e => {
+            e.stopPropagation();
+            if (toggleAgentComposerPopover('model')) renderModelPopover();
         };
 
         els.scopeImageBtn.onclick = () => { state.modelScopeTab = 'image'; renderModelPopover(); };
@@ -2031,13 +2639,36 @@
             updateToolbarLabels();
         };
 
-        els.sizeBtn.onclick = () => {
-            const opening = !els.sizePopover.classList.contains('open');
-            closeAllAgentPopovers();
-            if (opening) {
-                renderSizePopover();
-                els.sizePopover.classList.add('open');
+        els.skillBtn.onclick = e => {
+            e.stopPropagation();
+            if (toggleAgentComposerPopover('skill')) {
+                window.LLMSkills?.load?.().then(() => renderSkillPopover()).catch(() => {});
+                renderSkillPopover();
             }
+        };
+
+        els.skillCreateBtn.onclick = () => {
+            closeAllAgentPopovers();
+            els.skillManageBtn?.click();
+        };
+        els.skillSysBtn.onclick = () => {
+            closeAllAgentPopovers();
+            openSysDrawer();
+        };
+        els.skillFilterTabs.querySelectorAll('[data-stab]').forEach(btn => {
+            btn.onclick = () => {
+                state.skillFilterTab = btn.dataset.stab || 'all';
+                renderSkillPopover();
+            };
+        });
+        els.skillSearchInput.addEventListener('input', () => {
+            state.skillSearchQuery = els.skillSearchInput.value || '';
+            renderSkillPopover();
+        });
+
+        els.sizeBtn.onclick = e => {
+            e.stopPropagation();
+            if (toggleAgentComposerPopover('size')) renderSizePopover();
         };
 
         els.sizePopover.querySelectorAll('[data-size-mode]').forEach(btn => {
@@ -2049,11 +2680,20 @@
             };
         });
 
-        els.autoRunBtn.onclick = () => {
-            state.autoRun = !state.autoRun;
-            saveAgentSettings();
-            updateToolbarLabels();
+        els.autoRunBtn.onclick = e => {
+            e.stopPropagation();
+            if (toggleAgentComposerPopover('mode')) renderModePopover();
         };
+
+        [els.modeOptManual, els.modeOptAuto].forEach(btn => {
+            btn?.addEventListener('click', () => {
+                state.autoRun = btn.dataset.autoMode === 'auto';
+                saveAgentSettings();
+                renderModePopover();
+                updateToolbarLabels();
+                closeAllAgentPopovers();
+            });
+        });
 
         // Rich contenteditable input events
         ['keyup', 'mouseup', 'focus'].forEach(evtName => {
@@ -2119,12 +2759,17 @@
             sendAgentMessage();
         };
 
-        els.panel.addEventListener('click', e => {
-            if (!e.target.closest('.sa-popover') && !e.target.closest('#saModelBtn') && !e.target.closest('#saSizeBtn')) {
-                els.modelPopover.classList.remove('open');
-                els.sizePopover.classList.remove('open');
-            }
-        });
+        // Close open portal popovers when clicking outside them or their toolbar trigger buttons
+        const triggerSelector = '#saUploadBtn, #saModelBtn, #saSkillBtn, #saSizeBtn, #saAutoRunBtn';
+        document.addEventListener('mousedown', e => {
+            if (e.target.closest('.sa-popover') || e.target.closest(triggerSelector)) return;
+            AGENT_POPOVERS.forEach(item => {
+                if (item.key === 'mention' && state.mentionOpen && e.target.closest('#saRichInput')) return;
+                els[item.pop]?.classList.remove('open');
+                if (item.btn !== 'composerBox') els[item.btn]?.classList.remove('open');
+                if (item.key === 'mention') state.mentionOpen = false;
+            });
+        }, true);
 
         els.composerBox.addEventListener('dragover', e => {
             if ([...(e.dataTransfer?.items || [])].some(it => it.kind === 'file')) {
@@ -2141,9 +2786,19 @@
             }
         });
 
+        window.addEventListener('resize', () => {
+            syncPanelLayoutUi(false);
+            AGENT_POPOVERS.forEach(cfg => {
+                const popEl = els[cfg.pop];
+                if (popEl?.classList.contains('open')) {
+                    positionAgentPopover(els[cfg.btn], popEl, cfg);
+                }
+            });
+        });
+
         window.addEventListener('storage', e => {
             if (e.key === GPT_CHAT_SETTINGS_KEY && state.promptSource === 'gpt') {
-                updateSysIndicator();
+                updateToolbarLabels();
                 renderPresetStrip();
             }
         });
@@ -2175,7 +2830,10 @@
             if (!uploaded.length) return;
 
             const shellRect = shell?.getBoundingClientRect() || { width: window.innerWidth, height: window.innerHeight };
-            const visibleW = Math.max(320, shellRect.width - (state.open ? 440 : 60));
+            const rightClear = state.open
+                ? (state.layoutMode === 'docked' ? (state.dockWidth + 24) : 430)
+                : 60;
+            const visibleW = Math.max(320, shellRect.width - rightClear);
             const baseWorldX = Math.round((visibleW * 0.28 - viewport.x) / viewport.scale);
             const baseWorldY = Math.round((shellRect.height * 0.24 - viewport.y) / viewport.scale);
 
@@ -2252,9 +2910,17 @@
             els.mentionHeadTitle.textContent = `插入节点引用（共 ${filtered.length}/${allEntries.length} 项）`;
         }
 
+        const openMentionPopover = () => {
+            closeAllAgentPopovers('saMentionPopover');
+            els.mentionPopover.classList.add('open');
+            const cfg = AGENT_POPOVERS.find(it => it.key === 'mention');
+            positionAgentPopover(els.composerBox, els.mentionPopover, cfg);
+            if (window.lucide) lucide.createIcons({ nodes: [els.mentionPopover] });
+        };
+
         if (!filtered.length) {
             els.mentionList.innerHTML = `<div style="padding:12px;font-size:12px;color:var(--sa-text-muted);text-align:center;">未找到匹配节点</div>`;
-            els.mentionPopover.classList.add('open');
+            openMentionPopover();
             return;
         }
 
@@ -2272,7 +2938,7 @@
                 </div>
             </button>`;
         }).join('');
-        els.mentionPopover.classList.add('open');
+        openMentionPopover();
 
         els.mentionList.querySelectorAll('.sa-mention-item').forEach(btn => {
             btn.onclick = () => {
@@ -2303,10 +2969,11 @@
         els.mentionPopover?.classList.remove('open');
     }
 
-    /* ===== Sub-Components (System Prompt, Presets, Model & Multi-Model Compare, Size) ===== */
+    /* ===== Sub-Components (System Prompt, Presets, Model Cards, Skill Popover, Mode, Size) ===== */
     function openSysDrawer() {
         els.sysTextarea.value = effectiveAgentSystemPrompt();
         els.sysSourceBadge.textContent = promptSourceLabel();
+        renderPresetStrip();
         if (window.LLMSkills && els.skillSelect) window.LLMSkills.refreshSelect(els.skillSelect, effectiveSkillIds());
         els.sysDrawer.classList.add('open');
         if (window.lucide) lucide.createIcons();
@@ -2318,12 +2985,12 @@
 
     function renderPresetStrip() {
         if (!els.presetStrip) return;
-        const presets = allPromptLibraryPresets().slice(0, 8);
+        const presets = allPromptLibraryPresets().slice(0, 12);
         const chips = [];
         const isGpt = state.promptSource === 'gpt';
         chips.push(`
-            <button type="button" class="sa-preset-chip ${isGpt ? 'active' : ''}" data-preset-source="gpt" title="使用 GPT 对话中的 Agent 系统提示词">
-                <i data-lucide="bot"></i><span>GPT系统词</span>${isGpt ? '<span class="sa-chip-dot"></span>' : ''}
+            <button type="button" class="sa-preset-chip ${isGpt ? 'active' : ''}" data-preset-source="gpt" title="使用 Agent智能改图 中的系统提示词">
+                <i data-lucide="bot"></i><span>智能改图词</span>${isGpt ? '<span class="sa-chip-dot"></span>' : ''}
             </button>
         `);
         presets.forEach(p => {
@@ -2333,7 +3000,7 @@
             chips.push(`
                 <button type="button" class="sa-preset-chip ${active ? 'active' : ''}" data-preset-source="${escapeHtml(key)}" title="${escapeHtml(p.name)}">
                     <i data-lucide="${icon}"></i>
-                    <span>${escapeHtml(p.name.length > 11 ? p.name.slice(0, 11) + '…' : p.name)}</span>
+                    <span>${escapeHtml(p.name.length > 15 ? p.name.slice(0, 15) + '…' : p.name)}</span>
                     ${active ? '<span class="sa-chip-dot"></span>' : ''}
                 </button>
             `);
@@ -2350,6 +3017,8 @@
             btn.onclick = () => {
                 state.promptSource = btn.dataset.presetSource;
                 saveAgentSettings();
+                if (els.sysTextarea) els.sysTextarea.value = effectiveAgentSystemPrompt();
+                if (els.sysSourceBadge) els.sysSourceBadge.textContent = promptSourceLabel();
                 renderPresetStrip();
                 updateSysIndicator();
                 if (typeof toast === 'function') toast(promptSourceLabel());
@@ -2368,14 +3037,56 @@
             els.modelBtn.classList.toggle('active', targets.length > 1);
             els.modelBtn.title = `大脑: ${state.chatModel || '默认'} | 生图: ${targets.map(t => shortModelLabel(t.model)).join(' + ')}`;
         }
+        if (els.skillBadgeCount) {
+            const activeSkills = effectiveSkillIds();
+            els.skillBadgeCount.textContent = activeSkills.length ? String(activeSkills.length) : '';
+            els.skillBtn?.classList.toggle('active', activeSkills.length > 0);
+        }
         if (els.sizeBtnLabel) els.sizeBtnLabel.textContent = sizeSummaryLabel();
         if (els.autoRunBtn && els.autoRunLabel) {
             els.autoRunBtn.classList.toggle('active', state.autoRun);
-            els.autoRunLabel.textContent = state.autoRun ? '自动生图' : '仅建节点';
+            els.autoRunLabel.textContent = state.autoRun ? '自动生成' : '手动生成';
+            if (els.autoRunIconWrap) {
+                els.autoRunIconWrap.innerHTML = `<i data-lucide="${state.autoRun ? 'refresh-cw' : 'hand'}"></i>`;
+                if (window.lucide) lucide.createIcons({ nodes: [els.autoRunIconWrap] });
+            }
         }
         if (els.clickRefToggleBtn) els.clickRefToggleBtn.classList.toggle('active', state.clickToRef);
         updateSysIndicator();
         syncSendButtonState();
+    }
+
+    function describeAgentModelCapability(modelId, isImg) {
+        const s = String(modelId || '').toLowerCase();
+        if (isImg) {
+            if (/fast|turbo|zimage/.test(s)) return '高效生成与编辑，满足高频创作需求';
+            if (/pro|ultra|max/.test(s)) return '注重画面细节与复杂指令理解，适合精细创作';
+            if (/kling/.test(s)) return '擅长写实图像生成，呈现清晰细节与细腻质感';
+            if (/seedream|doubao/.test(s)) return '真实质感生图，支持稳定编辑与参考图融合';
+            if (/minimax|h3/.test(s)) return '精准理解创意，支持多图参考与图像编辑';
+            if (/gpt-image|dall-e/.test(s)) return '强大指令遵循与图文排版编辑能力';
+            if (/banana|gemini/.test(s)) return '多图一致融合与精细局部改图引擎';
+            if (/flux|klein|qwen/.test(s)) return '高审美光影与写实摄影材质表现';
+            return '高清图像生成与参考图视觉编辑模型';
+        }
+        if (/gpt-5|o1|o3|o4/.test(s)) return '多模态强推理大脑，擅长拆解复杂改图指令';
+        if (/claude/.test(s)) return '细腻审美与长上下文提示词构建助手';
+        if (/gemini/.test(s)) return '原生多模态视觉理解，精准反推参考图特征';
+        if (/deepseek|qwen/.test(s)) return '高性价比敏捷对话与结构化提示词规划';
+        return '视觉分析与 Agent 对话调度引擎';
+    }
+
+    function agentModelIcon(modelId, isImg) {
+        const s = String(modelId || '').toLowerCase();
+        if (isImg) {
+            if (/seedream|kling/.test(s)) return 'aperture';
+            if (/banana|gemini/.test(s)) return 'wand-sparkles';
+            if (/zimage|turbo|fast/.test(s)) return 'zap';
+            return 'palette';
+        }
+        if (/gpt-5|o1|o3|o4/.test(s)) return 'cpu';
+        if (/gemini/.test(s)) return 'sparkles';
+        return 'bot';
     }
 
     function renderModelPopover() {
@@ -2384,10 +3095,11 @@
         els.scopeImageBtn.classList.toggle('active', isImg);
         els.scopeChatBtn.classList.toggle('active', !isImg);
         els.compareBar.style.display = isImg ? 'flex' : 'none';
+        els.compareToggleBtn.style.display = isImg ? 'inline-flex' : 'none';
         els.compareToggleBtn.classList.toggle('active', state.compareMode);
         els.compareToggleBtn.textContent = state.compareMode
             ? `多模型对比 (${state.compareTargets.length})`
-            : '开启多模型对比';
+            : '多模型对比';
 
         const providers = isImg ? availableImageProviders() : availableChatProviders();
         const activePid = isImg ? state.imageProvider : state.chatProvider;
@@ -2400,27 +3112,37 @@
                 const countInProv = (isImg && state.compareMode)
                     ? state.compareTargets.filter(ct => ct.provider === p.id).length
                     : 0;
-                return `<button type="button" class="sa-pop-opt ${p.id === currentProv?.id ? 'active' : ''}" data-prov="${escapeHtml(p.id)}">
+                return `<button type="button" class="sa-provider-pill ${p.id === currentProv?.id ? 'active' : ''}" data-prov="${escapeHtml(p.id)}">
                     <span>${escapeHtml(p.name)}</span>
-                    ${countInProv > 0 ? `<small style="color:#7dd3fc;font-weight:800;">${countInProv}</small>` : ''}
+                    ${countInProv > 0 ? `<small>${countInProv}</small>` : ''}
                 </button>`;
             }).join('')
-            : '<div class="sa-pop-opt">暂无可用线路</div>';
+            : '<div class="sa-provider-pill">暂无可用线路</div>';
 
         els.modelList.innerHTML = models.length
             ? models.map(m => {
                 const label = isImg && currentProv?.id === 'modelscope'
                     ? (MS_AGENT_IMAGE_MODELS.find(x => x.id === m)?.name || m)
-                    : m;
+                    : shortModelLabel(m);
                 const isChecked = isImg && state.compareMode
                     ? state.compareTargets.some(ct => ct.provider === currentProv.id && ct.model === m)
                     : (m === activeMdl);
-                return `<button type="button" class="sa-pop-opt ${isChecked ? 'active' : ''}" data-mdl="${escapeHtml(m)}">
-                    <span>${escapeHtml(label)}</span>
-                    ${(isImg && state.compareMode) ? `<span class="sa-opt-check">${isChecked ? '✓' : ''}</span>` : ''}
+                const desc = describeAgentModelCapability(m, isImg);
+                const icon = agentModelIcon(m, isImg);
+                return `<button type="button" class="sa-model-card-row ${isChecked ? 'active' : ''}" data-mdl="${escapeHtml(m)}" title="${escapeHtml(m)}">
+                    <span class="sa-model-card-badge"><i data-lucide="${icon}"></i></span>
+                    <span class="sa-model-card-meta">
+                        <div class="sa-model-card-name">${escapeHtml(label)}</div>
+                        <div class="sa-model-card-desc">${escapeHtml(desc)}</div>
+                    </span>
+                    ${(isImg && state.compareMode)
+                        ? `<span class="sa-opt-check">${isChecked ? '✓' : ''}</span>`
+                        : `<span class="sa-model-card-status"><i data-lucide="${isChecked ? 'check' : 'plus'}"></i></span>`}
                 </button>`;
             }).join('')
-            : '<div class="sa-pop-opt">暂无模型</div>';
+            : '<div style="padding:18px 10px;text-align:center;font-size:12px;color:var(--sa-text-muted);">暂无可用模型</div>';
+
+        if (window.lucide) lucide.createIcons({ nodes: [els.modelList] });
 
         els.providerList.querySelectorAll('[data-prov]').forEach(btn => {
             btn.onclick = () => {
@@ -2466,9 +3188,115 @@
                 saveAgentSettings();
                 renderModelPopover();
                 updateToolbarLabels();
-                els.modelPopover.classList.remove('open');
+                closeAllAgentPopovers();
             };
         });
+    }
+
+    function renderSkillPopover() {
+        if (!els.skillItemsList) return;
+        els.skillFilterTabs?.querySelectorAll('[data-stab]').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.stab === state.skillFilterTab);
+        });
+
+        const query = String(state.skillSearchQuery || '').trim().toLowerCase();
+        const activeSkillSet = new Set(effectiveSkillIds());
+        const skillsList = (window.LLMSkills?.list || []).map(s => ({
+            kind: 'skill',
+            id: String(s.id),
+            title: s.name || s.id,
+            slug: `/skill/${String(s.id).slice(0, 18)}`,
+            desc: s.description || (s.content || '').replace(/\s+/g, ' ').slice(0, 80) || '自定义工作流与提示词规范',
+            active: activeSkillSet.has(String(s.id))
+        }));
+        const presetsList = allPromptLibraryPresets().map(p => ({
+            kind: 'preset',
+            id: String(p.id),
+            title: p.name,
+            slug: '/preset',
+            desc: p.text.replace(/\s+/g, ' ').slice(0, 80),
+            active: state.promptSource === `preset:${p.id}`
+        }));
+
+        let combined = [];
+        if (state.skillFilterTab === 'skills') combined = skillsList;
+        else if (state.skillFilterTab === 'presets') combined = presetsList;
+        else if (state.skillFilterTab === 'active') combined = [...skillsList, ...presetsList].filter(i => i.active);
+        else combined = [...skillsList, ...presetsList];
+
+        if (query) {
+            combined = combined.filter(item =>
+                item.title.toLowerCase().includes(query) ||
+                item.desc.toLowerCase().includes(query) ||
+                item.slug.toLowerCase().includes(query)
+            );
+        }
+
+        if (!combined.length) {
+            els.skillItemsList.innerHTML = `<div style="padding:18px 10px;text-align:center;font-size:12px;color:var(--sa-text-muted);">没有匹配的 Skill 或预设词，可点击右上角「+ 创建」添加</div>`;
+            return;
+        }
+
+        els.skillItemsList.innerHTML = combined.map(item => {
+            if (item.kind === 'skill') {
+                return `<button type="button" class="sa-skill-row-item ${item.active ? 'active' : ''}" data-skill-toggle="${escapeHtml(item.id)}">
+                    <span class="sa-skill-row-icon"><i data-lucide="wrench"></i></span>
+                    <span class="sa-skill-row-main">
+                        <span class="sa-skill-row-top">
+                            <span class="sa-skill-row-title">${escapeHtml(item.title)}</span>
+                            <span class="sa-skill-row-slug">${escapeHtml(item.slug)}</span>
+                        </span>
+                        <div class="sa-skill-row-desc">${escapeHtml(item.desc)}</div>
+                    </span>
+                    <span class="sa-skill-row-act">${item.active ? '已启用' : '启用'}</span>
+                </button>`;
+            }
+            return `<button type="button" class="sa-skill-row-item ${item.active ? 'active' : ''}" data-preset-apply="${escapeHtml(item.id)}">
+                <span class="sa-skill-row-icon"><i data-lucide="wand-2"></i></span>
+                <span class="sa-skill-row-main">
+                    <span class="sa-skill-row-top">
+                        <span class="sa-skill-row-title">${escapeHtml(item.title)}</span>
+                        <span class="sa-skill-row-slug">${escapeHtml(item.slug)}</span>
+                    </span>
+                    <div class="sa-skill-row-desc">${escapeHtml(item.desc)}</div>
+                </span>
+                <span class="sa-skill-row-act">${item.active ? '已应用' : '应用'}</span>
+            </button>`;
+        }).join('');
+
+        if (window.lucide) lucide.createIcons({ nodes: [els.skillItemsList] });
+
+        els.skillItemsList.querySelectorAll('[data-skill-toggle]').forEach(btn => {
+            btn.onclick = () => {
+                const sid = String(btn.dataset.skillToggle);
+                const idx = state.skillIds.indexOf(sid);
+                if (idx >= 0) state.skillIds.splice(idx, 1);
+                else state.skillIds.push(sid);
+                saveAgentSettings();
+                if (window.LLMSkills && els.skillSelect) window.LLMSkills.refreshSelect(els.skillSelect, state.skillIds);
+                updateToolbarLabels();
+                renderSkillPopover();
+            };
+        });
+
+        els.skillItemsList.querySelectorAll('[data-preset-apply]').forEach(btn => {
+            btn.onclick = () => {
+                const pid = String(btn.dataset.presetApply);
+                state.promptSource = `preset:${pid}`;
+                saveAgentSettings();
+                if (els.sysTextarea) els.sysTextarea.value = effectiveAgentSystemPrompt();
+                if (els.sysSourceBadge) els.sysSourceBadge.textContent = promptSourceLabel();
+                renderPresetStrip();
+                updateToolbarLabels();
+                renderSkillPopover();
+                if (typeof toast === 'function') toast(promptSourceLabel());
+            };
+        });
+    }
+
+    function renderModePopover() {
+        els.modeOptManual?.classList.toggle('active', !state.autoRun);
+        els.modeOptAuto?.classList.toggle('active', Boolean(state.autoRun));
     }
 
     function renderSizePopover() {
@@ -2494,7 +3322,7 @@
                 state.customH = Math.max(256, Math.min(8192, Math.round((Number(document.getElementById('saCustomHInput').value) || 1024) / 16) * 16));
                 saveAgentSettings();
                 updateToolbarLabels();
-                els.sizePopover.classList.remove('open');
+                closeAllAgentPopovers();
             };
             return;
         }
@@ -2694,12 +3522,12 @@
         const reasoningWrap = document.createElement('details');
         reasoningWrap.className = 'sa-reasoning-box';
         reasoningWrap.hidden = !msg.reasoning;
-        reasoningWrap.innerHTML = `<summary>思考摘要</summary><div class="sa-reasoning-content">${escapeHtml(msg.reasoning || '')}</div>`;
+        reasoningWrap.innerHTML = `<summary><i data-lucide="lightbulb"></i><span>思考过程</span><i data-lucide="chevron-down" class="sa-reasoning-chevron"></i></summary><div class="sa-reasoning-content">${escapeHtml(msg.reasoning || '')}</div>`;
         bubble.appendChild(reasoningWrap);
 
         const textEl = document.createElement('div');
         textEl.className = 'sa-msg-text';
-        textEl.textContent = msg.content || '';
+        renderAgentFormattedText(textEl, msg.content || '');
         bubble.appendChild(textEl);
 
         const createdList = document.createElement('div');
@@ -2994,7 +3822,17 @@
         if (!target || typeof nodeRect !== 'function' || typeof applyViewport !== 'function') return;
         const rect = nodeRect(target);
         const shellRect = shell?.getBoundingClientRect() || { width: window.innerWidth, height: window.innerHeight };
-        const rightReserved = state.open ? Math.min(436, shellRect.width * 0.42) : 0;
+        let rightReserved = 0;
+        if (state.open) {
+            if (state.layoutMode === 'docked') {
+                rightReserved = Math.min(state.dockWidth + 24, shellRect.width * 0.45);
+            } else {
+                const fr = state.floatRect || normalizeAgentFloatRect(null);
+                if (fr.left > shellRect.width * 0.42) {
+                    rightReserved = Math.min(shellRect.width - fr.left + 16, shellRect.width * 0.42);
+                }
+            }
+        }
         const leftReserved = state.outlineOpen ? Math.min(348, shellRect.width * 0.32) : 0;
         const visibleCenterX = leftReserved + (shellRect.width - leftReserved - rightReserved) * 0.5;
         const visibleCenterY = shellRect.height * 0.38;
@@ -3110,7 +3948,10 @@
             y = Math.round(minTop + slotIndex * 360);
         } else {
             const shellRect = shell?.getBoundingClientRect() || { width: window.innerWidth, height: window.innerHeight };
-            const visibleW = Math.max(340, shellRect.width - (state.open ? 430 : 40));
+            const rightClear = state.open
+                ? (state.layoutMode === 'docked' ? (state.dockWidth + 24) : 430)
+                : 40;
+            const visibleW = Math.max(340, shellRect.width - rightClear);
             x = Math.round((visibleW * 0.45 - viewport.x) / viewport.scale - 150);
             y = Math.round((shellRect.height * 0.34 - viewport.y) / viewport.scale - 110 + slotIndex * 360);
         }
@@ -3610,7 +4451,7 @@
 
             const handleFallbackDelta = textSoFar => {
                 assistantRecord.content = textSoFar;
-                assistantDom._parts.textEl.textContent = textSoFar;
+                renderAgentFormattedText(assistantDom._parts.textEl, textSoFar);
                 scrollMessagesBottom();
             };
 
@@ -3620,7 +4461,7 @@
                     renderLiveStatus();
                 }, handleFallbackDelta);
                 assistantRecord.content = fb.visibleText;
-                assistantDom._parts.textEl.textContent = fb.visibleText;
+                renderAgentFormattedText(assistantDom._parts.textEl, fb.visibleText);
                 receivedPlan = fb.plan;
             } else {
                 const res = await fetch('/api/smart-canvas/agent/stream', {
@@ -3637,7 +4478,7 @@
                         renderLiveStatus();
                     }, handleFallbackDelta);
                     assistantRecord.content = fb.visibleText;
-                    assistantDom._parts.textEl.textContent = fb.visibleText;
+                    renderAgentFormattedText(assistantDom._parts.textEl, fb.visibleText);
                     receivedPlan = fb.plan;
                 } else {
                     if (!res.ok) {
@@ -3666,20 +4507,22 @@
                             stageText = evt.message || '正在处理…';
                             renderLiveStatus();
                         } else if (evt.type === 'reasoning') {
+                            const wasHidden = assistantDom._parts.reasoningWrap.hidden;
                             assistantRecord.reasoning += evt.delta || '';
                             assistantDom._parts.reasoningWrap.hidden = false;
                             assistantDom._parts.reasoningWrap.querySelector('.sa-reasoning-content').textContent = assistantRecord.reasoning;
+                            if (wasHidden && window.lucide) lucide.createIcons({ nodes: [assistantDom._parts.reasoningWrap] });
                             scrollMessagesBottom();
                         } else if (evt.type === 'delta') {
                             assistantRecord.content += evt.delta || '';
-                            assistantDom._parts.textEl.textContent = assistantRecord.content;
+                            renderAgentFormattedText(assistantDom._parts.textEl, assistantRecord.content);
                             scrollMessagesBottom();
                         } else if (evt.type === 'plan') {
                             receivedPlan = evt.plan;
                         } else if (evt.type === 'done') {
                             if (typeof evt.text === 'string') {
                                 assistantRecord.content = evt.text;
-                                assistantDom._parts.textEl.textContent = evt.text;
+                                renderAgentFormattedText(assistantDom._parts.textEl, evt.text);
                             }
                             if (evt.plan) receivedPlan = evt.plan;
                         } else if (evt.type === 'error') {
@@ -3718,7 +4561,7 @@
                 if (window.lucide) lucide.createIcons({ nodes: [assistantDom._parts.createdList] });
                 if (!assistantRecord.content && receivedPlan.reply) {
                     assistantRecord.content = receivedPlan.reply;
-                    assistantDom._parts.textEl.textContent = receivedPlan.reply;
+                    renderAgentFormattedText(assistantDom._parts.textEl, receivedPlan.reply);
                 }
             }
 
@@ -3801,8 +4644,11 @@
 
     async function fetchExtraConfig() {
         try {
-            const cfg = await fetch('/api/config').then(r => r.ok ? r.json() : {});
-            if (Array.isArray(cfg.ms_chat_models)) {
+            const [cfg] = await Promise.all([
+                fetch('/api/config').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+                window.LLMSkills?.load?.().catch(() => [])
+            ]);
+            if (Array.isArray(cfg?.ms_chat_models)) {
                 state.msChatModels = cfg.ms_chat_models;
             }
         } catch (_) {}

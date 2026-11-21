@@ -1,6 +1,8 @@
+import asyncio
 import copy
 import json
 import sys
+import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -521,6 +523,178 @@ class ChatStreamTests(unittest.IsolatedAsyncioTestCase):
         for values in ({"mode": "unknown"}, {"reasoning_effort": "maximum"}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 self.payload(**values)
+
+
+class ChatTaskTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.provider = {
+            "id": "test",
+            "name": "Test",
+            "protocol": "openai",
+            "base_url": "https://chat.example.test/v1",
+            "chat_models": ["gpt-5.5"],
+            "image_models": ["image-test"],
+        }
+        self.request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/chat/tasks",
+            "query_string": b"",
+            "headers": [],
+            "scheme": "http",
+            "server": ("localhost", 3000),
+            "client": ("127.0.0.1", 12345),
+        })
+        self.stack.enter_context(patch.object(main, "CONVERSATION_DIR", self.temp.name))
+        self.stack.enter_context(patch.object(main, "CHAT_TASKS", {}))
+        self.stack.enter_context(patch.object(main, "safe_user_id", return_value="test-user"))
+        self.stack.enter_context(patch.object(main, "get_api_provider", return_value=self.provider))
+        self.stack.enter_context(patch.object(main, "pick_chat_image_provider", return_value=self.provider))
+        self.stack.enter_context(patch.object(
+            main,
+            "resolve_chat_provider",
+            side_effect=lambda provider, model, ms_model: (
+                "https://chat.example.test/v1", {}, model or "gpt-5.5"
+            ),
+        ))
+        self.stack.enter_context(patch.object(main, "chat_system_prompt", return_value="Test assistant."))
+        self.stack.enter_context(patch.object(main, "friendly_chat_error_detail", return_value=""))
+
+    def payload(self, **overrides):
+        return main.ChatRequest(**{
+            "message": "Generate an image.",
+            "model": "gpt-5.5",
+            "image_model": "image-test",
+            "provider": "test",
+            "image_provider": "test",
+            "mode": "agent",
+            **overrides,
+        })
+
+    async def collect_events(self, response):
+        result = []
+        async for chunk in response.body_iterator:
+            if isinstance(chunk, bytes):
+                chunk = chunk.decode()
+            for frame in chunk.split("\n\n"):
+                for line in frame.splitlines():
+                    if line.startswith("data:"):
+                        result.append(json.loads(line[5:].strip()))
+        return result
+
+    async def test_chat_task_survives_stream_disconnect_and_persists_reply(self):
+        started_generate = asyncio.Event()
+        allow_finish = asyncio.Event()
+
+        async def slow_generate(*_args, **_kwargs):
+            started_generate.set()
+            await allow_finish.wait()
+            return {"type": "url", "value": "https://cdn.example.test/recovered.png"}, {}
+
+        decision = {"action": "generate_image", "prompt": "Front product shot", "reply": "Generating now."}
+        with patch.object(main, "decide_chat_agent_action", AsyncMock(return_value=decision)), \
+             patch.object(main, "generate_ai_image", side_effect=slow_generate), \
+             patch.object(main, "save_ai_image_to_output", AsyncMock(return_value="/output/recovered.png")):
+            created = await main.create_chat_task(self.payload(), self.request, "test-user")
+            task_id = created["task_id"]
+            conv_id = created["conversation"]["id"]
+            self.assertEqual([m["role"] for m in created["conversation"]["messages"]], ["user", "assistant"])
+            self.assertEqual(created["message"]["status"], "running")
+
+            stream_resp = await main.stream_chat_task(task_id, self.request, "test-user")
+            await asyncio.wait_for(started_generate.wait(), timeout=2.0)
+
+            seen_types = []
+            while "plan" not in seen_types:
+                chunk = await stream_resp.body_iterator.__anext__()
+                text = chunk.decode() if isinstance(chunk, bytes) else chunk
+                for line in text.splitlines():
+                    if line.startswith("data:"):
+                        seen_types.append(json.loads(line[5:].strip())["type"])
+
+            # Simulate browser refresh closing the SSE stream early.
+            await stream_resp.body_iterator.aclose()
+
+            allow_finish.set()
+            await asyncio.wait_for(main.CHAT_TASKS[task_id]["task_handle"], timeout=2.0)
+
+        task_info = await main.get_chat_task(task_id, self.request, "test-user")
+        self.assertEqual(task_info["status"], "succeeded")
+        conv_resp = await main.get_conversation(conv_id, self.request, "test-user")
+        msgs = conv_resp["conversation"]["messages"]
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
+        self.assertEqual(msgs[1]["status"], "done")
+        self.assertEqual(msgs[1]["image_url"], "/output/recovered.png")
+        self.assertEqual(msgs[1]["image_urls"], ["/output/recovered.png"])
+
+    async def test_chat_task_stream_replays_events_after_reconnect(self):
+        decision = {"action": "generate_image", "prompt": "Poster", "reply": "Done."}
+        with patch.object(main, "decide_chat_agent_action", AsyncMock(return_value=decision)), \
+             patch.object(main, "generate_ai_image", AsyncMock(return_value=({"url": "/fake"}, {}))), \
+             patch.object(main, "save_ai_image_to_output", AsyncMock(return_value="/output/replayed.png")):
+            created = await main.create_chat_task(self.payload(), self.request, "test-user")
+            task_id = created["task_id"]
+            await asyncio.wait_for(main.CHAT_TASKS[task_id]["task_handle"], timeout=2.0)
+
+        replay_resp = await main.stream_chat_task(task_id, self.request, "test-user")
+        events = await self.collect_events(replay_resp)
+        event_types = [ev["type"] for ev in events]
+        self.assertIn("plan", event_types)
+        self.assertIn("image", event_types)
+        self.assertEqual(event_types[-1], "done")
+        self.assertEqual(events[-1]["message"]["image_url"], "/output/replayed.png")
+
+    async def test_stale_running_message_reconciled_and_excluded_from_llm_history(self):
+        conv = main.new_conversation("test-user", "Interrupted test")
+        conv["messages"] = [
+            {"id": "u1", "role": "user", "content": "Make this front view", "created_at": 1},
+            {
+                "id": "a1",
+                "role": "assistant",
+                "type": "image",
+                "content": "",
+                "created_at": 2,
+                "status": "running",
+                "task_id": "missing_task_after_restart",
+            },
+        ]
+        main.save_conversation("test-user", conv)
+
+        resp = await main.get_conversation(conv["id"], self.request, "test-user")
+        assistant_msg = resp["conversation"]["messages"][1]
+        self.assertEqual(assistant_msg["status"], "interrupted")
+        self.assertIn("中断", assistant_msg["error"])
+
+        persisted = main.load_conversation("test-user", conv["id"])
+        self.assertEqual(persisted["messages"][1]["status"], "interrupted")
+
+        for bad_status in ("running", "failed", "interrupted"):
+            self.assertIsNone(main.upstream_message_from_record({
+                "role": "assistant",
+                "content": "stale text",
+                "status": bad_status,
+            }))
+        self.assertIsNotNone(main.upstream_message_from_record({
+            "role": "assistant",
+            "content": "ok text",
+            "status": "done",
+        }))
+
+    async def test_chat_task_image_mode_completes_in_background(self):
+        with patch.object(main, "generate_ai_image", AsyncMock(return_value=({"url": "/fake"}, {}))), \
+             patch.object(main, "save_ai_image_to_output", AsyncMock(return_value="/output/direct.png")):
+            created = await main.create_chat_task(self.payload(mode="image"), self.request, "test-user")
+            task_id = created["task_id"]
+            stream_resp = await main.stream_chat_task(task_id, self.request, "test-user")
+            events = await self.collect_events(stream_resp)
+
+        self.assertEqual([ev["type"] for ev in events], ["status", "image", "done"])
+        self.assertEqual(events[-1]["message"]["status"], "done")
+        self.assertEqual(events[-1]["message"]["image_url"], "/output/direct.png")
 
 
 if __name__ == "__main__":

@@ -23,11 +23,11 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.21.2.1794902612"></script>
-    <script src="/static/js/theme.js?v=2026.11.21.2.1795234217"></script>
-    <script src="/static/js/i18n.js?v=2026.11.21.2.1794902556"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.22.1.1794902612"></script>
+    <script src="/static/js/theme.js?v=2026.11.22.1.1795234217"></script>
+    <script src="/static/js/i18n.js?v=2026.11.22.1.1794902556"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.11.21.2.1794902588');
+        @import url('/static/vendor/css/fonts.css?v=2026.11.22.1.1794902588');
 
         /* 本地 Tailwind 工具类兜底：CDN 慢/未就绪时也能立刻给图标尺寸，避免首屏左侧栏空白 */
         .w-1\.5 { width: 0.375rem; }
@@ -1468,7 +1468,7 @@
             max-width: 42px;
         }
     </style>
-    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.21.2.1795234213">
+    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.22.1.1795276495">
 </head>
 
 <body>
@@ -1480,46 +1480,7 @@
             </button>
 
             <nav>
-                <button class="nav-fold-toggle" id="local-nav-toggle" type="button" onclick="toggleLocalNav()" aria-expanded="true" title="折叠本地功能">
-                    <svg class="nav-fold-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <polyline points="6 9 12 15 18 9"></polyline>
-                    </svg>
-                    <span class="nav-text" data-i18n="nav.localTools">本地功能</span>
-                </button>
-
-                <div class="nav-fold-group" id="local-nav-group">
-                    <div class="nav-item active" onclick="switchUI(this, 'zimage')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.587-1.587a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.textToImage">文生图</span>
-                    </div>
-                    <div class="nav-item" onclick="switchUI(this, 'enhance')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.enhance">细节增强</span>
-                    </div>
-                    <div class="nav-item" onclick="switchUI(this, 'klein')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.imageEdit">图片编辑</span>
-                    </div>
-                    <div class="nav-item" onclick="switchUI(this, 'angle')">
-                        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                            <line x1="12" y1="22.08" x2="12" y2="12"></line>
-                        </svg>
-                        <span class="nav-text" data-i18n="nav.angle">角度控制</span>
-                    </div>
-                </div>
-
-                <!-- 分隔线 -->
-                <div style="width:32px;height:1px;background:var(--border);margin:8px auto;transition:background 0.3s;"></div>
-
-                <div class="nav-item" onclick="switchUI(this, 'online')">
+                <div class="nav-item active" onclick="switchUI(this, 'online')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2z"></path>
                         <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
@@ -1528,9 +1489,13 @@
                 </div>
                 <div class="nav-item" onclick="switchUI(this, 'gpt-chat')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"></path>
+                        <path d="M20 3v4"></path>
+                        <path d="M22 5h-4"></path>
+                        <path d="M4 17v2"></path>
+                        <path d="M5 18H3"></path>
                     </svg>
-                    <span class="nav-text" data-i18n="nav.gpt">GPT 对话</span>
+                    <span class="nav-text" data-i18n="nav.gpt">Agent智能改图</span>
                 </div>
                 <div class="nav-item" onclick="switchUI(this, 'canvas')">
                     <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1657,11 +1622,12 @@
             </div>
         </aside>
         <script>
-            /* 在侧栏 DOM 解析完后立即把 active 类移到当前页对应的入口，避免首屏先在文生图上闪一下 */
+            /* 在侧栏 DOM 解析完后立即把 active 类移到当前页对应的入口，避免首屏闪动 */
             (function(){
                 try {
+                    var validIds = ['online','gpt-chat','canvas','asset-manager','api-settings','comfyui-settings'];
                     var pageId = localStorage.getItem('studio_active_page');
-                    if(pageId && pageId !== 'zimage') {
+                    if(pageId && validIds.indexOf(pageId) >= 0 && pageId !== 'online') {
                         document.querySelectorAll('.nav-item.active, .side-pill.active').forEach(function(n){
                             n.classList.remove('active');
                         });
@@ -1673,16 +1639,12 @@
         </script>
 
         <main class="stage">
-            <iframe id="frame-zimage" data-src="/static/zimage.html?v=2026.11.21.2.1795251282" class="active" scrolling="yes"></iframe>
-            <iframe id="frame-enhance" data-src="/static/enhance.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-klein" data-src="/static/klein.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-angle" data-src="/static/angle.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-online" data-src="/static/online.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-comfyui-settings" data-src="/static/comfyui-settings.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
-            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.11.21.2.1795251282" scrolling="yes"></iframe>
+            <iframe id="frame-online" data-src="/static/online.html?v=2026.11.22.1.1795278698" class="active" scrolling="yes"></iframe>
+            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.11.22.1.1795280719" scrolling="yes"></iframe>
+            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.11.22.1.1795276718" scrolling="yes"></iframe>
+            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.11.22.1.1795276718" scrolling="yes"></iframe>
+            <iframe id="frame-comfyui-settings" data-src="/static/comfyui-settings.html?v=2026.11.22.1.1795276718" scrolling="yes"></iframe>
+            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.11.22.1.1795276718" scrolling="yes"></iframe>
 
         </main>
     </div>
@@ -1774,12 +1736,10 @@
         const CID = localStorage.getItem("client_id") || generateUUID();
         localStorage.setItem("client_id", CID);
         const ACTIVE_PAGE_KEY = 'studio_active_page';
-        const LOCAL_NAV_COLLAPSED_KEY = 'studio_local_nav_collapsed';
         const SIDEBAR_SETTINGS_COLLAPSED_KEY = 'studio_sidebar_settings_collapsed';
         const SIDEBAR_PINNED_KEY = 'studio_sidebar_pinned';
-        const DEFAULT_PAGE_ID = 'zimage';
-        const PAGE_IDS = ['zimage','enhance','klein','angle','online','gpt-chat','canvas','asset-manager','api-settings','comfyui-settings'];
-        const LOCAL_PAGE_IDS = ['zimage','enhance','klein','angle'];
+        const DEFAULT_PAGE_ID = 'online';
+        const PAGE_IDS = ['online','gpt-chat','canvas','asset-manager','api-settings','comfyui-settings'];
         const PROJECT_URL = 'https://github.com/18258180792/Infinite-CanvasCC';
         let appInfo = { version:'', repo_url:PROJECT_URL, version_url:'https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION' };
         let updateConnectivityResult = null;
@@ -1817,27 +1777,6 @@
 
         function restoreSidebarPinned() {
             setSidebarPinned(localStorage.getItem(SIDEBAR_PINNED_KEY) === '1', { skipRemember:true });
-        }
-
-        function setLocalNavCollapsed(collapsed, options = {}) {
-            const group = document.getElementById('local-nav-group');
-            const toggle = document.getElementById('local-nav-toggle');
-            if(group) group.classList.toggle('is-collapsed', collapsed);
-            if(toggle) {
-                toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-                toggle.title = collapsed ? '展开本地功能' : '折叠本地功能';
-            }
-            if(!options.skipRemember) localStorage.setItem(LOCAL_NAV_COLLAPSED_KEY, collapsed ? '1' : '0');
-        }
-
-        function toggleLocalNav() {
-            const group = document.getElementById('local-nav-group');
-            setLocalNavCollapsed(!group?.classList.contains('is-collapsed'));
-        }
-
-        function restoreLocalNav(id) {
-            const savedCollapsed = localStorage.getItem(LOCAL_NAV_COLLAPSED_KEY) === '1';
-            setLocalNavCollapsed(savedCollapsed && !LOCAL_PAGE_IDS.includes(id), { skipRemember:true });
         }
 
         function setSidebarSettingsCollapsed(collapsed, options = {}) {
@@ -1883,11 +1822,6 @@
             syncThemeToFrame(target);
             syncLanguageToFrame(target);
             syncScaleToFrame(target);
-            if(LOCAL_PAGE_IDS.includes(id)) {
-                setLocalNavCollapsed(false, { skipRemember:true });
-            } else {
-                setLocalNavCollapsed(localStorage.getItem(LOCAL_NAV_COLLAPSED_KEY) === '1', { skipRemember:true });
-            }
             if(id === 'comfyui-settings') {
                 setSidebarSettingsCollapsed(false, { skipRemember:true });
             }
@@ -1920,7 +1854,6 @@
         function restoreActivePage() {
             restoreSidebarPinned();
             const id = PAGE_IDS.includes(localStorage.getItem(ACTIVE_PAGE_KEY)) ? localStorage.getItem(ACTIVE_PAGE_KEY) : DEFAULT_PAGE_ID;
-            restoreLocalNav(id);
             restoreSidebarSettings(id);
             const trigger = document.querySelector(`[onclick*="'${id}'"],[onclick*='"${id}"']`);
             switchUI(trigger, id, { skipRemember:true });

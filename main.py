@@ -1,4 +1,5 @@
 import json
+import copy
 import uuid
 import base64
 import hashlib
@@ -423,7 +424,7 @@ JIMENG_LOGIN_SESSION = {
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
 SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
-SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", "openai-responses", "tudou-async", "grsai"}
+SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", "openai-responses", "openai-chat", "tudou-async", "grsai"}
 RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.ai"
 RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.ai/openapi/v2"
 RUNNINGHUB_MODEL_REGISTRY_URL = "https://raw.githubusercontent.com/HM-RunningHub/ComfyUI_RH_OpenAPI/main/models_registry.json"
@@ -3986,11 +3987,22 @@ def conversation_path(user_id, conversation_id):
 def now_ms():
     return int(time.time() * 1000)
 
+CONVERSATION_UPDATE_LOCK = Lock()
+
 def save_conversation(user_id, conversation):
     with CONVERSATION_LOCK:
         path = conversation_path(user_id, conversation["id"])
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(conversation, f, ensure_ascii=False, indent=2)
+        tmp = f"{path}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(conversation, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 def new_conversation(user_id, title="新对话"):
     timestamp = now_ms()
@@ -4023,13 +4035,17 @@ def list_conversations(user_id):
         except Exception:
             continue
         messages = data.get("messages", [])
-        last_message = next((m for m in reversed(messages) if m.get("role") != "system"), None)
+        non_system = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+        last_message = next(
+            (m for m in reversed(non_system) if str(m.get("content") or "").strip() or str(m.get("status_text") or "").strip()),
+            non_system[-1] if non_system else None,
+        )
         records.append({
             "id": data.get("id"),
             "title": data.get("title", "新对话"),
             "created_at": data.get("created_at", 0),
             "updated_at": data.get("updated_at", 0),
-            "last_message": (last_message or {}).get("content", ""),
+            "last_message": (last_message or {}).get("content") or (last_message or {}).get("status_text") or "",
         })
     return sorted(records, key=lambda item: item["updated_at"], reverse=True)
 
@@ -9103,6 +9119,18 @@ def content_type_for_path(path):
         return "image/jpeg"
     if ext == ".webp":
         return "image/webp"
+    if ext == ".bmp":
+        return "image/bmp"
+    if ext == ".avif":
+        return "image/avif"
+    if ext in [".tif", ".tiff"]:
+        return "image/tiff"
+    if ext == ".ico":
+        return "image/x-icon"
+    if ext == ".svg":
+        return "image/svg+xml"
+    if ext in [".heic", ".heif"]:
+        return "image/heic"
     if ext == ".txt":
         return "text/plain; charset=utf-8"
     if ext == ".json":
@@ -9204,39 +9232,172 @@ def _flatten_image_to_rgb(img: Image.Image) -> Image.Image:
     return img.convert("RGB")
 
 
-def compact_multipart_image_bytes(filename: str, content: bytes, mime: str, is_mask: bool = False) -> Tuple[str, bytes, str]:
-    """对超过 600KB 的非蒙版参考图做高画质轻量压缩（不透明大图转 JPEG Q90 / 最长边 2048），防止上传耗时几十秒或报 413。"""
-    if is_mask or len(content) <= 600 * 1024:
+OPENAI_DIRECT_IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+
+
+def _image_bytes_need_format_normalization(content: bytes, mime: str = "", is_mask: bool = False) -> bool:
+    """检测字节流或声明 MIME 是否为需要转码的格式（如 GIF / 动态 WebP / BMP / TIFF / AVIF，或非 PNG 蒙版）。"""
+    clean_mime = str(mime or "").split(";", 1)[0].strip().lower()
+    if is_mask:
+        return clean_mime != "image/png" or (len(content) >= 8 and not content.startswith(b"\x89PNG\r\n\x1a\n") and content[:4] in (b"GIF8", b"\xff\xd8\xff\xe0", b"\xff\xd8\xff\xe1", b"RIFF", b"BM\x00\x00"))
+    if clean_mime and clean_mime not in OPENAI_DIRECT_IMAGE_MIMES:
+        return True
+    head = content[:32]
+    if head.startswith((b"GIF87a", b"GIF89a", b"BM", b"II*\x00", b"MM\x00*")):
+        return True
+    if len(head) >= 12 and head[4:12] in (b"ftypavif", b"ftypavis", b"ftypheic", b"ftypheix", b"ftypmif1"):
+        return True
+    if len(head) >= 16 and head[:4] == b"RIFF" and head[8:12] == b"WEBP" and b"ANIM" in content[:64]:
+        return True
+    return False
+
+
+def _extract_composited_frames(src: Image.Image, target_indices: List[int]) -> List[Image.Image]:
+    """按帧合成 GIF / 动态 WebP，避免局部差量帧（delta frame）直接抽取出现黑底或残影。"""
+    n_frames = max(1, int(getattr(src, "n_frames", 1) or 1))
+    wanted = sorted({max(0, min(n_frames - 1, int(idx))) for idx in target_indices})
+    if not wanted:
+        return []
+    if n_frames <= 1:
+        frame = ImageOps.exif_transpose(src)
+        frame.load()
+        return [frame.copy()]
+    max_idx = wanted[-1]
+    wanted_set = set(wanted)
+    out: List[Image.Image] = []
+    canvas = Image.new("RGBA", src.size, (255, 255, 255, 0))
+    for idx in range(max_idx + 1):
+        try:
+            src.seek(idx)
+        except EOFError:
+            break
+        disposal = int(src.info.get("disposal", getattr(src, "disposal_method", 0)) or 0)
+        prev_canvas = canvas.copy() if disposal == 3 else None
+        frame_rgba = src.convert("RGBA")
+        canvas = Image.alpha_composite(canvas, frame_rgba)
+        if idx in wanted_set:
+            out.append(canvas.copy())
+        if disposal == 2:
+            canvas = Image.new("RGBA", src.size, (255, 255, 255, 0))
+        elif disposal == 3 and prev_canvas is not None:
+            canvas = prev_canvas
+    return out
+
+
+def _encode_pil_image_to_data_url(img: Image.Image, max_size: Optional[int] = None, jpeg_quality: int = 86, flatten_alpha: bool = False) -> str:
+    work = img.copy()
+    if max_size and max(work.size) > max_size:
+        work.thumbnail((max_size, max_size), Image.LANCZOS)
+    has_alpha = False if flatten_alpha else image_has_meaningful_alpha(work)
+    buf = BytesIO()
+    if has_alpha:
+        if work.mode != "RGBA":
+            work = work.convert("RGBA")
+        work.save(buf, format="PNG", optimize=True)
+        out_mime = "image/png"
+    else:
+        rgb_img = _flatten_image_to_rgb(work)
+        rgb_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        out_mime = "image/jpeg"
+    return f"data:{out_mime};base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+
+
+def animated_image_to_frame_data_urls(value, max_frames: int = 4, max_size: int = 768) -> List[str]:
+    """若输入为多帧动态 GIF / 动态 WebP，均匀采样最多 max_frames 张静态关键帧转成标准 JPEG/PNG Data URL。
+    既避免 OpenAI 等视觉模型拒绝动态 GIF，又让 GPT-4o / GPT-4.1 / GPT-5 能完整理解动图动作序列；单帧静态图返回 []。"""
+    raw_str = value.get("url", "") if isinstance(value, dict) else str(value or "")
+    raw_str = str(raw_str or "").strip()
+    if not raw_str:
+        return []
+    raw_bytes: Optional[bytes] = None
+    local_path: Optional[str] = None
+    if raw_str.startswith("data:image/") and ";base64," in raw_str:
+        header, encoded = raw_str.split(";base64,", 1)
+        if not any(tok in header.lower() for tok in ("gif", "webp", "apng")):
+            return []
+        try:
+            raw_bytes = base64.b64decode(re.sub(r"\s+", "", encoded), validate=False)
+        except Exception:
+            return []
+    else:
+        local_path = resolve_reference_local_path(raw_str)
+        if not local_path:
+            return []
+        ext = os.path.splitext(local_path)[1].lower()
+        if ext not in {".gif", ".webp", ".apng", ".png"}:
+            return []
+    try:
+        ctx = Image.open(BytesIO(raw_bytes)) if raw_bytes is not None else Image.open(local_path)
+        with ctx as src:
+            is_anim = bool(getattr(src, "is_animated", False))
+            n_frames = int(getattr(src, "n_frames", 1) or 1)
+            if not is_anim or n_frames <= 1:
+                return []
+            target_count = max(2, min(int(max_frames or 4), n_frames))
+            if target_count >= n_frames:
+                indices = list(range(n_frames))
+            else:
+                indices = [round(i * (n_frames - 1) / (target_count - 1)) for i in range(target_count)]
+            frames = _extract_composited_frames(src, indices)
+            return [_encode_pil_image_to_data_url(frame, max_size=max_size, jpeg_quality=85, flatten_alpha=True) for frame in frames if frame is not None]
+    except Exception as exc:
+        print(f"[animated-frames] failed to extract animated frames: {exc}")
+        return []
+
+
+def compact_multipart_image_bytes(filename: str, content: bytes, mime: str, is_mask: bool = False, force_square_png: bool = False) -> Tuple[str, bytes, str]:
+    """对参考图做格式兼容转码与高画质轻量压缩：
+    1) OpenAI /images/edits 仅接受 PNG/JPEG/WEBP（拒绝 GIF/BMP/TIFF/AVIF），遇非常规格式或动图无论大小一律转码；
+    2) 超过 600KB 的大图自动压缩至最长边 2048（透明保 PNG，不透明转 JPEG Q90），防止上传超时或 413。"""
+    needs_norm = force_square_png or _image_bytes_need_format_normalization(content, mime, is_mask=is_mask)
+    if not needs_norm and (is_mask or len(content) <= 600 * 1024):
         return (filename, content, mime)
     try:
         with Image.open(BytesIO(content)) as src:
-            img = ImageOps.exif_transpose(src)
-            img.load()
+            n_frames = int(getattr(src, "n_frames", 1) or 1)
+            if n_frames > 1:
+                composited = _extract_composited_frames(src, [0])
+                img = composited[0] if composited else src.convert("RGBA")
+            else:
+                img = ImageOps.exif_transpose(src)
+                img.load()
+            stem = os.path.splitext(filename or "reference")[0] or "reference"
+            if is_mask or force_square_png:
+                if img.mode != "RGBA":
+                    img = img.convert("RGBA")
+                if force_square_png and img.width != img.height:
+                    side = min(max(img.width, img.height), 1024)
+                    sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+                    img.thumbnail((side, side), Image.LANCZOS)
+                    sq.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
+                    img = sq
+                buf = BytesIO()
+                img.save(buf, format="PNG", optimize=True)
+                return (f"{stem}.png", buf.getvalue(), "image/png")
             has_alpha = image_has_meaningful_alpha(img)
             if max(img.size) > 2048:
                 img.thumbnail((2048, 2048), Image.LANCZOS)
             buf = BytesIO()
-            stem = os.path.splitext(filename or "reference")[0] or "reference"
             if has_alpha:
                 if img.mode != "RGBA":
                     img = img.convert("RGBA")
                 img.save(buf, format="PNG", optimize=True)
                 out_bytes = buf.getvalue()
-                if len(out_bytes) < len(content):
+                if needs_norm or len(out_bytes) < len(content):
                     return (f"{stem}.png", out_bytes, "image/png")
             else:
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                img.save(buf, format="JPEG", quality=90, optimize=True)
+                rgb_img = _flatten_image_to_rgb(img)
+                q = 92 if len(content) <= 600 * 1024 else 90
+                rgb_img.save(buf, format="JPEG", quality=q, optimize=True)
                 out_bytes = buf.getvalue()
-                if len(out_bytes) < len(content):
+                if needs_norm or len(out_bytes) < len(content):
                     return (f"{stem}.jpg", out_bytes, "image/jpeg")
     except Exception:
         pass
     return (filename, content, mime)
 
 
-def inline_image_edit_file(ref):
+def inline_image_edit_file(ref, force_square_png: bool = False):
     """Decode a canvas data URL into an OpenAI multipart image/mask file."""
     header, separator, encoded = str(ref.get("url") or "").partition(",")
     mime = header[5:].split(";", 1)[0].lower()
@@ -9250,11 +9411,12 @@ def inline_image_edit_file(ref):
         raise HTTPException(status_code=400, detail="参考图内容为空，请重新添加图片。")
     extension = mimetypes.guess_extension(mime) or ".png"
     is_mask = str(ref.get("role") or "").strip().lower() == "mask"
-    return compact_multipart_image_bytes("reference" + extension, content, mime, is_mask=is_mask)
+    return compact_multipart_image_bytes("reference" + extension, content, mime, is_mask=is_mask, force_square_png=force_square_png)
 
 
 def _encode_path_to_data_url(path: str, max_size: Optional[int] = None, jpeg_quality: int = 86, flatten_alpha: bool = False) -> str:
     abs_path = os.path.abspath(path)
+    ext_lower = os.path.splitext(abs_path)[1].lower()
     try:
         st = os.stat(abs_path)
         cache_key = (abs_path, st.st_mtime_ns, st.st_size, int(max_size or 0), int(jpeg_quality), bool(flatten_alpha))
@@ -9268,29 +9430,28 @@ def _encode_path_to_data_url(path: str, max_size: Optional[int] = None, jpeg_qua
                 return cached
 
     result = None
-    # 当指定了 max_size，或原文件较大（> 512KB）时，自动将不透明 RGBA/PNG 转为高质 JPEG，体积直降 85~95%
-    should_optimize = bool(max_size) or flatten_alpha or (cache_key is not None and cache_key[2] > 512 * 1024)
+    force_transcode = ext_lower not in {".png", ".jpg", ".jpeg", ".webp"}
+    if not force_transcode and ext_lower == ".webp":
+        try:
+            with open(abs_path, "rb") as fh_head:
+                head64 = fh_head.read(64)
+            if b"ANIM" in head64:
+                force_transcode = True
+        except OSError:
+            pass
+    # 当指定了 max_size、非常规/动图格式、或原文件较大（> 512KB）时，自动规范化为高画质 PNG/JPEG Data URL
+    should_optimize = force_transcode or bool(max_size) or flatten_alpha or (cache_key is not None and cache_key[2] > 512 * 1024)
     if should_optimize:
         try:
             with Image.open(abs_path) as src:
-                img = ImageOps.exif_transpose(src)
-                img.load()
-                w, h = img.size
-                if max_size and max(w, h) > max_size:
-                    img.thumbnail((max_size, max_size), Image.LANCZOS)
-                has_alpha = False if flatten_alpha else image_has_meaningful_alpha(img)
-                buf = BytesIO()
-                if has_alpha:
-                    if img.mode != "RGBA":
-                        img = img.convert("RGBA")
-                    img.save(buf, format="PNG", optimize=True)
-                    mime = "image/png"
+                n_frames = int(getattr(src, "n_frames", 1) or 1)
+                if n_frames > 1:
+                    composited = _extract_composited_frames(src, [0])
+                    img = composited[0] if composited else src.convert("RGBA")
                 else:
-                    rgb_img = _flatten_image_to_rgb(img)
-                    rgb_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
-                    mime = "image/jpeg"
-                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-                result = f"data:{mime};base64,{encoded}"
+                    img = ImageOps.exif_transpose(src)
+                    img.load()
+                result = _encode_pil_image_to_data_url(img, max_size=max_size, jpeg_quality=jpeg_quality, flatten_alpha=flatten_alpha)
         except Exception as e:
             print(f"reference resize failed, fallback to raw: {e}")
 
@@ -9328,6 +9489,10 @@ def reference_to_data_url(ref, max_size=None):
     raw_url = ref.get("url", "") if isinstance(ref, dict) else str(ref or "")
     path = resolve_reference_local_path(raw_url)
     if not path:
+        if isinstance(raw_url, str) and raw_url.startswith("data:image/"):
+            header = raw_url.split(";base64,", 1)[0].lower()
+            if not any(m in header for m in ("image/png", "image/jpeg", "image/jpg", "image/webp")):
+                return compress_data_url_image(raw_url, max_size=max_size or 1536, jpeg_quality=88)
         return raw_url
     return _encode_path_to_data_url(path, max_size=max_size)
 
@@ -9341,7 +9506,7 @@ def is_image_reference(ref):
         return kind == "image"
     if mime:
         return mime.startswith("image/")
-    return bool(re.search(r"\.(png|jpe?g|webp|gif|bmp|tiff?)(\?|#|$)", url))
+    return bool(re.search(r"\.(png|jpe?g|webp|gif|bmp|avif|tiff?|heic|heif)(\?|#|$)", url))
 
 def image_references(refs):
     return [ref for ref in (refs or []) if is_image_reference(ref)]
@@ -9774,8 +9939,13 @@ def compress_data_url_image(value, max_size=1536, jpeg_quality=88, raise_on_inva
     try:
         raw = base64.b64decode(encoded)
         with Image.open(BytesIO(raw)) as src:
-            img = ImageOps.exif_transpose(src)
-            img.load()
+            is_anim = bool(getattr(src, "is_animated", False) or int(getattr(src, "n_frames", 1) or 1) > 1)
+            if is_anim:
+                frames = _extract_composited_frames(src, max_frames=1)
+                img = frames[0] if frames else ImageOps.exif_transpose(src).copy()
+            else:
+                img = ImageOps.exif_transpose(src)
+                img.load()
             if max_size and max(img.size) > max_size:
                 img.thumbnail((max_size, max_size), Image.LANCZOS)
             has_alpha = image_has_meaningful_alpha(img)
@@ -9798,6 +9968,20 @@ def compress_data_url_image(value, max_size=1536, jpeg_quality=88, raise_on_inva
             raise
         print(f"data url image compress failed, fallback to raw: {e}")
         return value
+
+def vision_image_urls_for_reference(value_or_ref, max_image_size=1280, max_frames=4) -> List[str]:
+    """将对话 / Agent / Canvas LLM 的参考图标准化为视觉模型安全支持的静态帧列表。
+    - 动图 GIF / 动态 WebP：OpenAI Vision 拒绝动态 GIF（仅支持非动态 GIF），此处自动合成并均匀抽取最多 max_frames 帧静态关键帧；
+    - BMP / TIFF / AVIF / 静态 GIF 等：自动转码压缩为 PNG/JPEG DataURL。"""
+    ref_dict = value_or_ref if isinstance(value_or_ref, dict) else {"url": str(value_or_ref or "").strip()}
+    raw_u = str(ref_dict.get("url") or "").strip()
+    if not raw_u:
+        return []
+    anim_frames = animated_image_to_frame_data_urls(ref_dict, max_frames=max_frames, max_size=max_image_size or 1024)
+    if len(anim_frames) > 1:
+        return anim_frames
+    single = media_reference_to_url(raw_u, max_image_size=max_image_size) or reference_to_data_url(ref_dict, max_size=max_image_size)
+    return [single] if single else []
 
 SOONSTUDIO_SEEDREAM_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
@@ -11080,6 +11264,73 @@ def is_gpt_image_2_model(model):
         or compact.endswith("gptimage2")
     )
 
+def is_gpt_image_1_model(model):
+    raw = str(model or "").strip().lower()
+    if not raw or is_gpt_image_2_model(raw):
+        return False
+    normalized = re.sub(r"[^a-z0-9.]+", "-", raw).strip("-")
+    compact = re.sub(r"[^a-z0-9]+", "", raw)
+    return (
+        normalized in {"gpt-image-1", "gpt-image-1.5", "gpt-image-1-mini", "chatgpt-image-latest"}
+        or normalized.startswith(("gpt-image-1-", "gpt-image-1.5-", "chatgpt-image-"))
+        or normalized.endswith(("-gpt-image-1", "-gpt-image-1.5"))
+        or "-gpt-image-1-" in normalized
+        or compact in {"gptimage1", "gptimage15", "gptimage1mini"}
+    )
+
+def is_gpt_image_family_model(model):
+    return is_gpt_image_2_model(model) or is_gpt_image_1_model(model)
+
+def normalize_gpt_image_1_size(size):
+    raw = str(size or "").strip().lower()
+    if raw in {"", "auto"}:
+        return "auto"
+    width, height = parse_size_pair(size)
+    if not width or not height:
+        return str(size).strip()
+    if (width, height) in {(1024, 1024), (1536, 1024), (1024, 1536)}:
+        return f"{width}x{height}"
+    if abs(width - height) <= max(width, height) * 0.12:
+        return "1024x1024"
+    return "1536x1024" if width > height else "1024x1536"
+
+def is_dalle3_model(model):
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(model or "").strip().lower()).strip("-")
+    return normalized in {"dall-e-3", "dalle-3", "dalle3"} or normalized.endswith(("-dall-e-3", "-dalle-3"))
+
+def normalize_dalle3_size(size):
+    width, height = parse_size_pair(size)
+    if not width or not height:
+        return "1024x1024"
+    if (width, height) in {(1024, 1024), (1792, 1024), (1024, 1792)}:
+        return f"{width}x{height}"
+    if abs(width - height) <= max(width, height) * 0.12:
+        return "1024x1024"
+    return "1792x1024" if width > height else "1024x1792"
+
+def normalize_dalle3_quality(quality):
+    return "hd" if str(quality or "").strip().lower() in {"hd", "high"} else "standard"
+
+def is_dalle2_model(model):
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(model or "").strip().lower()).strip("-")
+    return normalized in {"dall-e-2", "dalle-2", "dalle2"} or normalized.endswith(("-dall-e-2", "-dalle-2"))
+
+def normalize_dalle2_size(size):
+    width, height = parse_size_pair(size)
+    edge = max(width, height) if (width and height) else 1024
+    if edge <= 384:
+        return "256x256"
+    if edge <= 768:
+        return "512x512"
+    return "1024x1024"
+
+def is_chat_completions_image_model(model):
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(model or "").strip().lower()).strip("-")
+    return (
+        normalized in {"gpt-4o-image", "gpt-4o-image-vip", "gpt-4o-all", "sora-image", "sora-image-vip"}
+        or normalized.startswith(("gpt-4o-image-", "sora-image-"))
+    )
+
 def normalize_gpt_image_2_size(size):
     width, height = parse_size_pair(size)
     if not width or not height:
@@ -11153,24 +11404,42 @@ def apimart_image_generation_payload(model, prompt, size, quality="", image_refs
     body = {"model": model, "prompt": prompt}
     refs = [reference_to_data_url(ref, max_size=1536) for ref in (image_refs or [])[:ONLINE_IMAGE_REFERENCE_MAX]]
     refs = [value for value in refs if value]
-    if model_text.startswith("gemini-") or "gemini-" in model_text:
+    is_gemini_like = (
+        model_text.startswith("gemini-")
+        or "gemini-" in model_text
+        or "nano-banana" in model_text
+        or model_text.startswith("imagen")
+    )
+    if is_gemini_like:
         requested_ratio = str(aspect_ratio or "").strip().replace(" ", "")
         if not re.fullmatch(r"\d+:\d+", requested_ratio):
             requested_ratio = apimart_size_resolution(size)[0]
         body["aspect_ratio"] = requested_ratio
-        if model_text.endswith("-2k"):
+        requested_res = str(resolution or "").strip().lower()
+        if requested_res in {"1k", "2k", "4k"}:
+            body["image_size"] = requested_res.upper()
+        elif model_text.endswith("-4k") or model_text.endswith("-4k-cl"):
+            body["image_size"] = "4K"
+        elif model_text.endswith("-2k") or model_text.endswith("-2k-cl"):
             body["image_size"] = "2K"
         body["response_format"] = "url"
         if refs:
             body["image"] = refs
         return body
     if size and str(size).strip().lower() != "auto":
-        body["size"] = normalize_gpt_image_2_size(size) if model_text.startswith("gpt-image-2") else str(size).strip()
+        if is_gpt_image_2_model(model_text):
+            body["size"] = normalize_gpt_image_2_size(size)
+        elif is_gpt_image_1_model(model_text):
+            norm_s = normalize_gpt_image_1_size(size)
+            if norm_s != "auto":
+                body["size"] = norm_s
+        else:
+            body["size"] = str(size).strip()
     if quality and str(quality).strip().lower() in {"low", "medium", "high", "auto"}:
         body["quality"] = str(quality).strip().lower()
     if refs:
         body["image"] = refs
-    if model_text.startswith("gpt-image-2") or model_text.startswith("seedream"):
+    if is_gpt_image_family_model(model_text) or model_text.startswith("seedream") or "seedream" in model_text:
         body["response_format"] = "url"
     else:
         body["aspect_ratio"] = apimart_size_resolution(size)[0]
@@ -12781,6 +13050,72 @@ async def generate_grsai_provider_image(prompt, size, model, reference_images=No
                 continue
         raise HTTPException(status_code=504, detail=f"Grsai 生图任务超时，task_id={task_id}")
 
+def chat_completions_output_image(raw):
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return extract_image(raw)
+    except HTTPException:
+        pass
+    text = text_from_chat_response(raw).strip()
+    if not text:
+        return None
+    found = image_payload_from_string(text)
+    if found:
+        return found
+    md_match = re.search(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", text)
+    if md_match:
+        return {"type": "url", "value": md_match.group(1).strip()}
+    url_match = re.search(r"https?://[^\s<>\"')]+", text)
+    if url_match:
+        candidate = url_match.group(0).rstrip(".,;)")
+        if not re.search(r"\.(html?|json|txt|md)(\?|$)", candidate, re.I):
+            return {"type": "url", "value": candidate}
+    return None
+
+async def generate_chat_completions_provider_image(prompt, size, model, reference_images=None, provider=None, aspect_ratio=""):
+    """通过 /v1/chat/completions 调用对话式生图模型（如 gpt-4o-image / sora_image 或显式 openai-chat 模式）。"""
+    provider = provider or {}
+    base_url = (provider.get("base_url") or AI_BASE_URL).rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider.get('id') or '平台'} 未配置 Base URL")
+    chat_url = provider_endpoint_url(provider, "chat_endpoint", "/v1/chat/completions")
+    prompt_text = str(prompt or "").strip()
+    ratio_hint = str(aspect_ratio or "").strip()
+    if not ratio_hint and size and str(size).strip().lower() != "auto":
+        w, h = parse_size_pair(size)
+        if w and h:
+            ratio_hint = f"{w}x{h}"
+    if ratio_hint and ratio_hint not in prompt_text:
+        prompt_text = f"{prompt_text}\n（目标画幅/尺寸：{ratio_hint}）".strip()
+    refs = [ref for ref in (reference_images or []) if isinstance(ref, dict) and ref.get("url")]
+    if refs:
+        content = [{"type": "text", "text": prompt_text}]
+        for ref in refs[:ONLINE_IMAGE_REFERENCE_MAX]:
+            data_url = await asyncio.to_thread(reference_to_data_url, ref, 1536)
+            if data_url:
+                content.append({"type": "image_url", "image_url": {"url": data_url}})
+        messages = [{"role": "user", "content": content}]
+    else:
+        messages = [{"role": "user", "content": prompt_text}]
+    timeout = httpx.Timeout(connect=20.0, read=600.0, write=120.0, pool=20.0)
+    async with shared_async_http_client(timeout=timeout, trust_env=provider_trust_env(provider)) as client:
+        response = await client.post(
+            chat_url,
+            headers=api_headers(provider=provider, model=model),
+            json={"model": model, "messages": messages, "stream": False},
+        )
+        response.raise_for_status()
+        raw = response.json()
+        image = chat_completions_output_image(raw)
+        if image:
+            return image, raw
+        preview = text_from_chat_response(raw).strip()[:300]
+        raise HTTPException(
+            status_code=502,
+            detail=f"对话生图接口未返回可识别的图片链接或 Base64{f'：{preview}' if preview else ''}",
+        )
+
 async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly", aspect_ratio="", resolution=""):
     provider = get_api_provider(provider_id)
     if is_tudou_provider(provider):
@@ -12797,7 +13132,8 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         return await generate_runninghub_provider_image(prompt, size, model, reference_images, provider)
     # An explicitly selected image mode takes precedence over a manually set
     # provider protocol (for example, a stale Volcengine/Ark selection).
-    if effective_image_request_mode(provider, model) == "grsai":
+    image_request_mode = effective_image_request_mode(provider, model)
+    if image_request_mode == "grsai":
         return await generate_grsai_provider_image(prompt, size, model, reference_images, provider, aspect_ratio, resolution)
     if effective_protocol(provider, model) == "gemini" and not apimart_gemini_uses_generations(provider, model):
         return await generate_gemini_provider_image(prompt, size, model, reference_images, provider, aspect_ratio, resolution)
@@ -12807,22 +13143,41 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         return await generate_tudou_async_image(prompt, size, quality, model, reference_images, provider, aspect_ratio, resolution)
     if is_tudou_provider(provider) and is_tudou_grok_image_model(model):
         return await generate_tudou_grok_image(prompt, size, model, reference_images, provider, aspect_ratio)
+    if image_request_mode == "openai-chat" or (image_request_mode == "openai" and is_chat_completions_image_model(model) and not is_apimart_provider(provider)):
+        return await generate_chat_completions_provider_image(prompt, size, model, reference_images, provider, aspect_ratio)
     is_gpt2 = is_gpt_image_2_model(model)
+    is_gpt1 = is_gpt_image_1_model(model)
+    is_gpt_family = is_gpt2 or is_gpt1
+    is_dalle3 = is_dalle3_model(model)
+    is_dalle2 = is_dalle2_model(model)
     is_apimart = is_apimart_provider(provider) and not is_soonstudio_provider(provider)
-    # 不对 GPT 尺寸做任何缩小/拦截：用户选什么尺寸就原样发给上游；
-    # 若超过 GPT 的最大像素限制被上游拒绝，再由 friendly_image_error_detail 给出友好的像素上限提示。
-    quality = str(quality or "").strip().lower()
-    if quality not in {"low", "medium", "high"}:
+    refs = [ref for ref in (reference_images or []) if ref.get("url")]
+    mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
+    image_refs = [ref for ref in refs if ref not in mask_refs]
+    if is_dalle3:
+        if image_refs or mask_refs:
+            raise HTTPException(
+                status_code=400,
+                detail="DALL·E 3 仅支持纯文生图，不支持参考图或遮罩编辑；请切换到 GPT-Image-1.5 / GPT-Image-2 / Nano Banana / Seedream 等支持图生图的模型。",
+            )
+        size = normalize_dalle3_size(size)
+        quality = normalize_dalle3_quality(quality)
+    elif is_dalle2:
+        size = normalize_dalle2_size(size)
         quality = ""
+    else:
+        if is_gpt1:
+            size = normalize_gpt_image_1_size(size)
+        # 不对 GPT-Image-2 尺寸做任何缩小/拦截：用户选什么尺寸就原样发给上游；
+        # 若超过 GPT 的最大像素限制被上游拒绝，再由 friendly_image_error_detail 给出友好的像素上限提示。
+        quality = str(quality or "").strip().lower()
+        if quality not in {"low", "medium", "high"}:
+            quality = ""
     base_url = (provider.get("base_url") or AI_BASE_URL).rstrip("/")
     if not base_url:
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
     gen_url = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/images/generations")
     edit_url = provider_endpoint_url(provider, "image_edit_endpoint", "/v1/images/edits")
-    refs = [ref for ref in (reference_images or []) if ref.get("url")]
-    mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
-    image_refs = [ref for ref in refs if ref not in mask_refs]
-    image_request_mode = effective_image_request_mode(provider, model)
     is_soonstudio = is_soonstudio_provider(provider)
     model_lower = str(model or "").strip().lower()
     is_soonstudio_seedream = is_soonstudio and ("seedream" in model_lower)
@@ -12833,7 +13188,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         raise HTTPException(status_code=400, detail="SoonStudio Seedream 最多支持 10 张参考图，请减少后重试。")
     if comfly_async and mask_refs:
         raise HTTPException(status_code=400, detail="Comfly seedream-v5-pro 的 JSON 接口未声明 mask 支持，已停止提交，避免忽略局部编辑范围。")
-    request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or is_soonstudio or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
+    request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt_family or is_apimart or is_soonstudio or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
     if comfly_async:
         request_timeout = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=15.0)
     async with shared_async_http_client(timeout=request_timeout, trust_env=provider_trust_env(provider)) as client:
@@ -12979,8 +13334,10 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         elif is_apimart:
             body = apimart_image_generation_payload(model, prompt, size, quality, image_refs, aspect_ratio, resolution)
             response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
-        elif is_gpt2 and not image_refs and not mask_refs:
-            body = {"model": model, "prompt": prompt, "size": size}
+        elif is_gpt_family and not image_refs and not mask_refs:
+            body = {"model": model, "prompt": prompt}
+            if size:
+                body["size"] = size
             if quality:
                 body["quality"] = quality
             response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
@@ -12988,7 +13345,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 response = await post_openai_edits()
         elif image_refs:
             # 1) OpenAI 协议的图生图/编辑用 multipart 提交到 /images/edits；
-            # GPT-Image-2 参考图不能走 /images/generations JSON，否则部分平台会忽略原图或报 Images API unsupported。
+            # GPT-Image-1/2 参考图不能走 /images/generations JSON，否则部分平台会忽略原图或报 Images API unsupported。
             files = []
             opened = []
             edit_failed_status = None
@@ -13002,12 +13359,20 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                         raw_bytes,
                         content_type_for_path(file_path),
                         is_mask=is_mask,
+                        force_square_png=is_dalle2 and not is_mask,
                     )
 
-                for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]:
+                def _prepare_inline_multipart(ref_item: dict, is_mask: bool = False):
+                    fname, fbytes, fmime = inline_image_edit_file(ref_item)
+                    if is_mask or is_dalle2:
+                        return compact_multipart_image_bytes(fname, fbytes, fmime, is_mask=is_mask, force_square_png=is_dalle2 and not is_mask)
+                    return fname, fbytes, fmime
+
+                ref_limit = 1 if is_dalle2 else ONLINE_IMAGE_REFERENCE_MAX
+                for ref in image_refs[:ref_limit]:
                     ref_url = str(ref.get("url") or "").strip()
                     if ref_url.startswith("data:"):
-                        files.append(("image", await asyncio.to_thread(inline_image_edit_file, ref)))
+                        files.append(("image", await asyncio.to_thread(_prepare_inline_multipart, ref, False)))
                         continue
                     path = output_file_from_url(ref_url) or resolve_reference_local_path(ref_url)
                     if not path and ref_url.startswith(("http://", "https://")):
@@ -13021,7 +13386,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 if mask_refs:
                     mask_url = str(mask_refs[0].get("url") or "").strip()
                     if mask_url.startswith("data:"):
-                        files.append(("mask", await asyncio.to_thread(inline_image_edit_file, mask_refs[0])))
+                        files.append(("mask", await asyncio.to_thread(_prepare_inline_multipart, mask_refs[0], True)))
                     mask_path = output_file_from_url(mask_url) or resolve_reference_local_path(mask_url)
                     if mask_path and os.path.isfile(mask_path):
                         files.append(("mask", await asyncio.to_thread(_prepare_local_multipart, mask_path, True)))
@@ -13043,17 +13408,18 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             finally:
                 for fh in opened:
                     fh.close()
-            # 2) edits 失败 → 非 GPT-Image-2 可回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
+            # 2) edits 失败 → 非 GPT-Image 系列可回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
             if response is None:
                 if is_soonstudio and edit_failed_status == -1:
                     raise HTTPException(
                         status_code=502,
                         detail="SoonStudio 图片编辑连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。",
                     )
-                if is_gpt2:
+                if is_gpt_family:
+                    model_label = "GPT-Image-2" if is_gpt2 else "GPT-Image-1"
                     raise HTTPException(
                         status_code=502,
-                        detail=f"GPT-Image-2 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
+                        detail=f"{model_label} 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
                     )
                 print(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
                 image_payload = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
@@ -13125,6 +13491,8 @@ def upstream_message_from_record(item, include_images: bool = True, max_image_si
     role = item.get("role")
     if role not in {"user", "assistant"} or item.get("type") == "image":
         return None
+    if role == "assistant" and item.get("status") in {"running", "failed", "interrupted"}:
+        return None
     attachments = item.get("attachments") or []
     if attachments and role == "user":
         text = item.get("content", "")
@@ -13140,18 +13508,22 @@ def upstream_message_from_record(item, include_images: bool = True, max_image_si
         content = [{"type": "text", "text": text}]
         image_urls = []
         seen_urls = set()
+        anim_notes = []
         for ref in img_refs:
             raw_u = str(ref.get("url") or "").strip()
             if not raw_u or raw_u in seen_urls:
                 continue
             seen_urls.add(raw_u)
-            url = media_reference_to_url(raw_u, max_image_size=max_image_size) or reference_to_data_url(ref, max_size=max_image_size)
-            if url:
-                image_urls.append(url)
-        image_urls.extend(attachment_embedded_image_data_urls(attachments[:CHAT_ATTACHMENT_MAX], max_images=max(0, CHAT_ATTACHMENT_MAX - len(image_urls))))
+            frames = vision_image_urls_for_reference(ref, max_image_size=max_image_size, max_frames=4)
+            if len(frames) > 1:
+                anim_notes.append(f"{ref.get('name') or '动图'}（已按时序抽取 {len(frames)} 帧静态关键帧）")
+            image_urls.extend(frames)
+        if anim_notes:
+            content[0]["text"] = f"{content[0]['text']}\n[系统说明：{'；'.join(anim_notes)}]".strip()
+        image_urls.extend(attachment_embedded_image_data_urls(attachments[:CHAT_ATTACHMENT_MAX], max_images=max(0, CHAT_ATTACHMENT_MAX + 4 - len(image_urls))))
         if not image_urls:
             return {"role": role, "content": text}
-        for url in image_urls[:CHAT_ATTACHMENT_MAX]:
+        for url in image_urls[:CHAT_ATTACHMENT_MAX + 4]:
             content.append({"type": "image_url", "image_url": {"url": url}})
         return {"role": role, "content": content}
     return {"role": role, "content": item.get("content", "")}
@@ -13849,7 +14221,7 @@ async def upload_image(files: List[UploadFile] = File(...)):
 @app.post("/api/ai/upload")
 async def upload_ai_reference(files: List[UploadFile] = File(...)):
     uploaded = []
-    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".tif", ".tiff", ".heic", ".heif"}
     video_exts = {".mp4", ".webm", ".mov", ".m4v", ".flv"}
     audio_exts = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
     doc_exts = {".pdf", ".txt", ".md", ".markdown", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".json", ".zip", ".yaml", ".yml", ".log"}
@@ -13874,7 +14246,15 @@ async def upload_ai_reference(files: List[UploadFile] = File(...)):
         elif ext in image_exts or content_type.startswith("image/"):
             kind = "image"
             if ext not in image_exts:
-                ext = ".jpg" if "jpeg" in content_type else ".webp" if "webp" in content_type else ".gif" if "gif" in content_type else ".png"
+                ext = (
+                    ".jpg" if "jpeg" in content_type
+                    else ".webp" if "webp" in content_type
+                    else ".gif" if "gif" in content_type
+                    else ".bmp" if "bmp" in content_type
+                    else ".avif" if "avif" in content_type
+                    else ".tiff" if "tiff" in content_type
+                    else ".png"
+                )
         elif ext in doc_exts or content_type.startswith(("text/", "application/")):
             kind = "file"
             if not ext:
@@ -13953,7 +14333,7 @@ async def upload_comfyui_base64(payload: Base64UploadRequest):
     return {"name": comfy_name}
 
 def _local_upload_kind_ext(filename, content_type):
-    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".tif", ".tiff", ".heic", ".heif"}
     video_exts = {".mp4", ".webm", ".mov", ".m4v", ".flv"}
     audio_exts = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
     ext = os.path.splitext(filename or "")[1].lower()
@@ -13968,7 +14348,15 @@ def _local_upload_kind_ext(filename, content_type):
         return "audio", ext
     if ext in image_exts or ct.startswith("image/"):
         if ext not in image_exts:
-            ext = ".jpg" if "jpeg" in ct else ".webp" if "webp" in ct else ".gif" if "gif" in ct else ".png"
+            ext = (
+                ".jpg" if "jpeg" in ct
+                else ".webp" if "webp" in ct
+                else ".gif" if "gif" in ct
+                else ".bmp" if "bmp" in ct
+                else ".avif" if "avif" in ct
+                else ".tiff" if "tiff" in ct
+                else ".png"
+            )
         return "image", ext
     return None, ext
 
@@ -16007,10 +16395,20 @@ async def build_online_image_result(payload: OnlineImageRequest):
     project_name = generated_image_project_name(payload.canvas_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
-    request_size = snap_size_to_multiple(payload.size, 16)
-    # GPT-Image-2 has a 3840px max edge and an 8,294,400-pixel ceiling.
-    if is_gpt_image_2_model(model):
-        request_size = normalize_gpt_image_2_size(request_size)
+    raw_requested_size = str(payload.size or "").strip()
+    if raw_requested_size.lower() == "auto" and is_gpt_image_family_model(model):
+        request_size = "auto"
+    else:
+        request_size = snap_size_to_multiple(payload.size, 16)
+        # GPT-Image-2 has a 3840px max edge and an 8,294,400-pixel ceiling.
+        if is_gpt_image_2_model(model):
+            request_size = normalize_gpt_image_2_size(request_size)
+        elif is_gpt_image_1_model(model):
+            request_size = normalize_gpt_image_1_size(request_size)
+        elif is_dalle3_model(model):
+            request_size = normalize_dalle3_size(request_size)
+        elif is_dalle2_model(model):
+            request_size = normalize_dalle2_size(request_size)
     refs = [ref.dict() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     count = max(1, min(8, int(payload.n or 1)))
@@ -16685,18 +17083,38 @@ IMAGE_PARAM_RESOLUTIONS = [
 def build_image_param_fields(engine: str, provider: dict, model: str):
     """返回某平台/引擎的图像生成参数字段定义。客户端按 type 动态渲染并回填到生成请求。
     字段 key 直接对应 OnlineImageRequest 的字段名（size/quality/n/reference_images）。"""
-    gpt_auto_size = engine == "api" and is_gpt_image_2_model(model)
-    image_resolutions = ([{"value": "auto", "label": "自动"}] + IMAGE_PARAM_RESOLUTIONS) if gpt_auto_size else IMAGE_PARAM_RESOLUTIONS
+    model_lower = str(model or "").strip().lower()
+    gpt_auto_size = engine == "api" and is_gpt_image_family_model(model)
+    is_dalle3 = engine == "api" and is_dalle3_model(model)
+    is_dalle2 = engine == "api" and is_dalle2_model(model)
+    is_seedream_flash = "dola-seedream-5.0-flash" in model_lower
+    if is_seedream_flash:
+        image_resolutions = [
+            {"value": "1k", "label": "1K"},
+            {"value": "1.5k", "label": "1.5K"},
+            {"value": "2k", "label": "2K"},
+        ]
+    elif gpt_auto_size:
+        image_resolutions = [{"value": "auto", "label": "自动"}] + IMAGE_PARAM_RESOLUTIONS
+    else:
+        image_resolutions = IMAGE_PARAM_RESOLUTIONS
+    ratios = (
+        [{"value": "1:1", "label": "1:1"}, {"value": "16:9", "label": "16:9"}, {"value": "9:16", "label": "9:16"}]
+        if is_dalle3 else
+        ([{"value": "1:1", "label": "1:1"}] if is_dalle2 else IMAGE_PARAM_RATIOS)
+    )
+    default_res = "auto" if gpt_auto_size else ("2k" if engine == "volcengine" or "seedream" in model_lower else "1k")
     size_field = {
         "key": "size", "type": "size", "label": "尺寸",
-        "ratios": IMAGE_PARAM_RATIOS, "resolutions": image_resolutions,
-        "default": {"ratio": "1:1", "resolution": "auto" if gpt_auto_size else "1k"},
+        "ratios": ratios, "resolutions": image_resolutions,
+        "default": {"ratio": "1:1", "resolution": default_res},
     }
     count_field = {
         "key": "n", "type": "int", "label": "数量", "control": "chips",
         "options": [1, 2, 3, 4], "default": 1,
     }
-    refs_field = {"key": "reference_images", "type": "refs", "label": "参考图", "max": ONLINE_IMAGE_REFERENCE_MAX}
+    max_refs = 0 if (is_dalle3 or "z-image" in model_lower or "-t2i" in model_lower) else (1 if is_dalle2 or "kontext" in model_lower else ONLINE_IMAGE_REFERENCE_MAX)
+    refs_field = {"key": "reference_images", "type": "refs", "label": "参考图", "max": max_refs}
 
     if engine == "runninghub":
         # RunningHub 参数按 app/工作流动态，需先选工作流再用 /api/runninghub/workflow-info 拉字段。
@@ -16704,7 +17122,16 @@ def build_image_param_fields(engine: str, provider: dict, model: str):
                  "label": "RunningHub 工作流参数将按所选工作流动态加载（开发中）。"}]
 
     fields = [size_field]
-    if engine in ("api", "volcengine"):
+    if is_dalle3:
+        fields.append({
+            "key": "quality", "type": "select", "label": "质量", "control": "chips",
+            "options": [
+                {"value": "standard", "label": "标准"},
+                {"value": "hd", "label": "高清 HD"},
+            ],
+            "default": "standard",
+        })
+    elif engine in ("api", "volcengine") and not is_dalle2:
         fields.append({
             "key": "quality", "type": "select", "label": "质量", "control": "chips",
             "options": [
@@ -16716,7 +17143,8 @@ def build_image_param_fields(engine: str, provider: dict, model: str):
             "default": "auto",
         })
     fields.append(count_field)
-    fields.append(refs_field)
+    if max_refs > 0:
+        fields.append(refs_field)
     return fields
 
 @app.get("/api/image-params")
@@ -18069,17 +18497,20 @@ async def _prepare_canvas_llm_upstream_messages(payload: CanvasLLMRequest, model
     ))
     if image_inputs or video_inputs:
         content_parts: List[Dict[str, Any]] = [{"type": "text", "text": payload.message}]
-        encoded_images = await asyncio.to_thread(
-            lambda: [media_reference_to_url(img, max_image_size=1024) for img in image_inputs[:8]]
+        encoded_groups = await asyncio.to_thread(
+            lambda: [vision_image_urls_for_reference(img, max_image_size=1024, max_frames=4) for img in image_inputs[:8]]
         )
         ok_imgs = 0
         seen_data_urls = set()
-        for ref_url in encoded_images:
-            if not ref_url or ref_url in seen_data_urls:
-                continue
-            seen_data_urls.add(ref_url)
-            content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
-            ok_imgs += 1
+        for group in encoded_groups:
+            if len(group) > 1:
+                content_parts.append({"type": "text", "text": f"以下是动图按时序抽取的 {len(group)} 帧静态关键帧："})
+            for ref_url in group:
+                if not ref_url or ref_url in seen_data_urls:
+                    continue
+                seen_data_urls.add(ref_url)
+                content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
+                ok_imgs += 1
         ok_videos = 0
         for video in video_inputs[:3]:
             frame_urls = await video_reference_to_frame_data_urls(video, max_frames=6, max_size=768)
@@ -18254,7 +18685,8 @@ async def create_conversation(payload: ConversationCreateRequest, request: Reque
 @app.get("/api/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, request: Request, x_user_id: str = Header(default="")):
     user_id = safe_user_id(x_user_id, request)
-    return {"conversation": load_conversation(user_id, conversation_id)}
+    conversation = load_conversation(user_id, conversation_id)
+    return {"conversation": _reconcile_conversation_running_tasks(user_id, conversation)}
 
 @app.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, request: Request, x_user_id: str = Header(default="")):
@@ -18871,13 +19303,16 @@ async def build_smart_canvas_agent_user_message(payload: SmartCanvasAgentRequest
                 for u in raw_node_imgs:
                     seen_vision_urls.add(u)
                 if raw_node_imgs:
-                    encoded_list = await asyncio.to_thread(
-                        lambda urls=raw_node_imgs: [media_reference_to_url(u, max_image_size=1024) for u in urls]
+                    encoded_groups = await asyncio.to_thread(
+                        lambda urls=raw_node_imgs: [vision_image_urls_for_reference(u, max_image_size=1024, max_frames=4) for u in urls]
                     )
-                    for ref_url in encoded_list:
-                        if ref_url:
-                            content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
-                            has_media_parts = True
+                    for group in encoded_groups:
+                        if len(group) > 1:
+                            content_parts.append({"type": "text", "text": f"节点 {node.id} 的动图关键帧（共 {len(group)} 帧）："})
+                        for ref_url in group:
+                            if ref_url:
+                                content_parts.append({"type": "image_url", "image_url": {"url": ref_url}})
+                                has_media_parts = True
             if node.id in allowed_vision_node_ids:
                 for vid_url in (node.video_urls or [])[:1]:
                     if not is_video_reference_value(vid_url):
@@ -20218,6 +20653,466 @@ def delete_llm_skill(skill_id: str):
     if legacy and os.path.isfile(legacy):
         os.remove(legacy)
     return {"ok": True}
+
+CHAT_TASKS: Dict[str, Dict[str, Any]] = {}
+CHAT_TASK_LOCK = Lock()
+
+def _prune_chat_tasks(max_completed: int = 200):
+    with CHAT_TASK_LOCK:
+        completed_items = [
+            (float(t.get("updated_at") or 0), tid)
+            for tid, t in CHAT_TASKS.items()
+            if t.get("finished") or t.get("status") != "running"
+        ]
+        if len(completed_items) <= max_completed:
+            return
+        completed_items.sort(key=lambda pair: pair[0])
+        for _ts, tid in completed_items[: len(completed_items) - max_completed]:
+            CHAT_TASKS.pop(tid, None)
+
+def _publish_chat_task_event(task_id: str, event: Dict[str, Any]):
+    with CHAT_TASK_LOCK:
+        task = CHAT_TASKS.get(task_id)
+        if not task:
+            return
+        task["events"].append(event)
+        task["updated_at"] = now_ms()
+        subscribers = list(task.get("subscribers") or [])
+    for queue in subscribers:
+        try:
+            queue.put_nowait(event)
+        except Exception:
+            pass
+
+def _finish_chat_task(task_id: str, status: str, error: str = ""):
+    with CHAT_TASK_LOCK:
+        task = CHAT_TASKS.get(task_id)
+        if not task or task.get("finished"):
+            return
+        task["status"] = status
+        task["error"] = error
+        task["updated_at"] = now_ms()
+        task["finished"] = True
+        subscribers = list(task.get("subscribers") or [])
+    for queue in subscribers:
+        try:
+            queue.put_nowait(None)
+        except Exception:
+            pass
+
+def _update_conversation_message(user_id: str, conversation_id: str, message_id: str, updater):
+    with CONVERSATION_UPDATE_LOCK:
+        try:
+            conversation = load_conversation(user_id, conversation_id)
+        except (HTTPException, OSError, ValueError):
+            return None
+        messages = conversation.get("messages") or []
+        target_idx = next(
+            (idx for idx, item in enumerate(messages) if isinstance(item, dict) and item.get("id") == message_id),
+            -1,
+        )
+        if target_idx < 0:
+            return None
+        current = dict(messages[target_idx])
+        updated = updater(current)
+        next_msg = dict(updated) if isinstance(updated, dict) else current
+        next_msg["id"] = message_id
+        messages[target_idx] = next_msg
+        conversation["updated_at"] = now_ms()
+        save_conversation(user_id, conversation)
+        return conversation
+
+def _reconcile_conversation_running_tasks(user_id: str, conversation: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(conversation, dict):
+        return conversation
+    messages = conversation.get("messages") or []
+    changed_disk = False
+    reloaded_after_success = False
+    result_conv = copy.deepcopy(conversation)
+    result_messages = result_conv.get("messages") or []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant" or msg.get("status") != "running":
+            continue
+        task_id = str(msg.get("task_id") or "").strip()
+        with CHAT_TASK_LOCK:
+            task = CHAT_TASKS.get(task_id) if task_id else None
+            task_snap = {
+                "status": task.get("status"),
+                "finished": bool(task.get("finished")),
+                "error": task.get("error") or "",
+                "status_text": task.get("status_text") or "",
+                "stream_text": task.get("stream_text") or "",
+                "stream_reasoning": task.get("stream_reasoning") or "",
+            } if task else None
+        if task_snap and task_snap["status"] == "running" and not task_snap["finished"]:
+            live = result_messages[idx]
+            if task_snap["status_text"]:
+                live["status_text"] = task_snap["status_text"]
+            if task_snap["stream_text"] and live.get("type") != "image":
+                live["content"] = task_snap["stream_text"]
+            if task_snap["stream_reasoning"]:
+                live["reasoning"] = task_snap["stream_reasoning"]
+        elif task_snap and task_snap["status"] == "succeeded":
+            reloaded_after_success = True
+        else:
+            err_msg = (task_snap or {}).get("error") or "服务已中断或重启，该次回复未完成，可点击重试。"
+            next_status = "failed" if (task_snap and task_snap.get("status") == "failed") else "interrupted"
+            msg["status"] = next_status
+            msg["error"] = err_msg
+            msg["status_text"] = err_msg
+            if msg.get("image_urls"):
+                msg["incomplete"] = True
+                msg["generation_error"] = err_msg
+            result_messages[idx] = copy.deepcopy(msg)
+            changed_disk = True
+    if changed_disk:
+        with CONVERSATION_UPDATE_LOCK:
+            conversation["updated_at"] = now_ms()
+            try:
+                save_conversation(user_id, conversation)
+            except OSError:
+                pass
+    elif reloaded_after_success and conversation.get("id"):
+        try:
+            fresh = load_conversation(user_id, conversation["id"])
+            if fresh is not conversation:
+                return fresh
+        except (HTTPException, OSError, ValueError):
+            pass
+    return result_conv
+
+async def run_chat_task(
+    task_id: str,
+    user_id: str,
+    conversation_id: str,
+    assistant_id: str,
+    payload: ChatRequest,
+    refs: List[Dict[str, Any]],
+):
+    image_refs = image_references(refs)
+    try:
+        conversation = load_conversation(user_id, conversation_id)
+        conv_for_iter = copy.deepcopy(conversation)
+        conv_for_iter["messages"] = [
+            m for m in (conv_for_iter.get("messages") or [])
+            if not (isinstance(m, dict) and m.get("id") == assistant_id)
+        ]
+
+        if payload.mode == "image":
+            image_provider_id = payload.provider if payload.provider not in {"modelscope"} else "comfly"
+            provider = get_api_provider(image_provider_id)
+            if not (provider.get("image_models") or []) and provider_protocol(provider) not in {"runninghub", "jimeng", "codex", "gemini-cli", "volcengine"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"当前平台「{provider.get('name') or provider.get('id')}」没有可用的生图模型，请切换到生图线路。",
+                )
+            default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
+            model = selected_model(payload.image_model or payload.model, default_model)
+            image_size = chat_prompt_size_override(payload.message, payload.size) or payload.size
+            with CHAT_TASK_LOCK:
+                if task_id in CHAT_TASKS:
+                    CHAT_TASKS[task_id]["status_text"] = "正在生成图片…"
+                    CHAT_TASKS[task_id]["updated_at"] = now_ms()
+            _publish_chat_task_event(task_id, {"type": "status", "stage": "image", "message": "正在生成图片…"})
+            image_data, raw = await generate_ai_image(
+                payload.message,
+                image_size,
+                payload.quality,
+                model,
+                image_refs,
+                provider["id"],
+                payload.aspect_ratio,
+                payload.resolution,
+            )
+            local_url = await save_ai_image_to_output(image_data, prefix="chat_")
+            assistant_message = {
+                "id": assistant_id,
+                "role": "assistant",
+                "type": "image",
+                "content": payload.message,
+                "image_url": local_url,
+                "image_urls": [local_url],
+                "image_count": 1,
+                "created_at": now_ms(),
+                "model": model,
+                "provider": provider["id"],
+                "size": image_size,
+                "used_references": image_refs,
+                "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
+                "status": "done",
+                "task_id": task_id,
+            }
+            updated_conv = _update_conversation_message(
+                user_id, conversation_id, assistant_id, lambda _cur: assistant_message
+            )
+            _publish_chat_task_event(task_id, {"type": "image", "url": local_url, "index": 1, "total": 1})
+            _publish_chat_task_event(task_id, {
+                "type": "done",
+                "conversation": updated_conv or conversation,
+                "message": assistant_message,
+            })
+            _finish_chat_task(task_id, "succeeded")
+            return
+
+        events = (
+            iter_chat_agent_reply(payload, conv_for_iter, image_refs)
+            if payload.mode == "agent"
+            else iter_chat_text_reply(payload, conv_for_iter)
+        )
+        completed = False
+        async for event in events:
+            etype = event.get("type")
+            if etype == "status":
+                status_msg = str(event.get("message") or "")
+                with CHAT_TASK_LOCK:
+                    if task_id in CHAT_TASKS:
+                        CHAT_TASKS[task_id]["status_text"] = status_msg
+                        CHAT_TASKS[task_id]["updated_at"] = now_ms()
+                _publish_chat_task_event(task_id, event)
+            elif etype == "plan":
+                action = event.get("action") or "chat"
+                prompt_val = event.get("prompt") or ""
+                reply_val = event.get("reply") or ""
+
+                def _apply_plan(cur):
+                    if action != "chat":
+                        cur["type"] = "image"
+                        if prompt_val:
+                            cur["content"] = prompt_val
+                        if reply_val:
+                            cur["agent_reply"] = reply_val
+                        cur["agent_action"] = action
+                        cur["status_text"] = reply_val or ("正在修改图片…" if action == "edit_image" else "正在生成图片…")
+                    else:
+                        cur["agent_action"] = "chat"
+                    return cur
+
+                _update_conversation_message(user_id, conversation_id, assistant_id, _apply_plan)
+                _publish_chat_task_event(task_id, event)
+            elif etype == "delta":
+                delta = event.get("delta") or ""
+                with CHAT_TASK_LOCK:
+                    if task_id in CHAT_TASKS:
+                        CHAT_TASKS[task_id]["stream_text"] = (CHAT_TASKS[task_id].get("stream_text") or "") + delta
+                        CHAT_TASKS[task_id]["updated_at"] = now_ms()
+                _publish_chat_task_event(task_id, event)
+            elif etype == "reasoning":
+                delta = event.get("delta") or ""
+                with CHAT_TASK_LOCK:
+                    if task_id in CHAT_TASKS:
+                        CHAT_TASKS[task_id]["stream_reasoning"] = (CHAT_TASKS[task_id].get("stream_reasoning") or "") + delta
+                        CHAT_TASKS[task_id]["updated_at"] = now_ms()
+                _publish_chat_task_event(task_id, event)
+            elif etype == "image":
+                img_url = event.get("url") or ""
+                if img_url:
+                    def _add_image(cur):
+                        urls = list(cur.get("image_urls") or [])
+                        if img_url not in urls:
+                            urls.append(img_url)
+                        cur["type"] = "image"
+                        cur["image_urls"] = urls
+                        cur["image_url"] = urls[0]
+                        cur["image_count"] = len(urls)
+                        return cur
+
+                    _update_conversation_message(user_id, conversation_id, assistant_id, _add_image)
+                _publish_chat_task_event(task_id, event)
+            elif etype == "partial":
+                partial_msg = copy.deepcopy(event.get("message") or {})
+                partial_msg["id"] = assistant_id
+                partial_msg["task_id"] = task_id
+                partial_msg["incomplete"] = True
+                partial_msg["status"] = "running"
+                updated_conv = _update_conversation_message(
+                    user_id, conversation_id, assistant_id, lambda _cur: partial_msg
+                )
+                _publish_chat_task_event(task_id, {
+                    "type": "partial",
+                    "conversation": updated_conv,
+                    "message": partial_msg,
+                })
+            elif etype == "message":
+                final_msg = copy.deepcopy(event.get("message") or {})
+                final_msg["id"] = assistant_id
+                final_msg["task_id"] = task_id
+                final_msg["status"] = "done"
+                final_msg.pop("status_text", None)
+                updated_conv = _update_conversation_message(
+                    user_id, conversation_id, assistant_id, lambda _cur: final_msg
+                )
+                done_ev = {
+                    "type": "done",
+                    "conversation": updated_conv,
+                    "message": final_msg,
+                }
+                if event.get("agent"):
+                    done_ev["agent"] = event["agent"]
+                _publish_chat_task_event(task_id, done_ev)
+                completed = True
+                _finish_chat_task(task_id, "succeeded")
+        if not completed:
+            raise HTTPException(status_code=502, detail="回复未完成，请重试。")
+    except Exception as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            text = exc.response.text or ""
+            if payload.mode == "image":
+                detail = friendly_image_error_detail(text, payload.size, payload.image_model or payload.model) or f"上游生图接口错误：{text[:300]}"
+            else:
+                detail = friendly_chat_error_detail(text, payload.model) or f"上游接口错误：{text[:300]}"
+        elif isinstance(exc, httpx.HTTPError):
+            log_net_error(f"后台对话任务 网络/TLS错误 mode={payload.mode}", exc)
+            detail = f"请求上游接口失败：{exc}"
+        elif isinstance(exc, HTTPException):
+            detail = str(exc.detail or "对话处理失败")
+        else:
+            LOG.exception("chat_task_failed task_id=%s mode=%s", task_id, payload.mode)
+            detail = "对话处理失败，请查看服务日志。"
+
+        def _mark_failed(cur):
+            cur["status"] = "failed"
+            cur["error"] = detail
+            cur["status_text"] = detail
+            if cur.get("image_urls"):
+                cur["incomplete"] = True
+                cur["generation_error"] = detail
+            return cur
+
+        updated_conv = _update_conversation_message(user_id, conversation_id, assistant_id, _mark_failed)
+        _publish_chat_task_event(task_id, {"type": "error", "detail": detail, "conversation": updated_conv})
+        _finish_chat_task(task_id, "failed", detail)
+    finally:
+        _finish_chat_task(task_id, "failed", "任务意外结束")
+        _prune_chat_tasks()
+
+@app.post("/api/chat/tasks")
+async def create_chat_task(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
+    user_id = safe_user_id(x_user_id, request)
+    conversation = (
+        load_conversation(user_id, payload.conversation_id)
+        if payload.conversation_id
+        else new_conversation(user_id, display_title(payload.message))
+    )
+    if not conversation.get("messages"):
+        conversation["title"] = display_title(payload.message)
+
+    refs = [ref.dict() for ref in payload.reference_images if ref.url]
+    task_id = f"chat_task_{uuid.uuid4().hex}"
+    user_message = {
+        "id": uuid.uuid4().hex,
+        "role": "user",
+        "content": payload.message,
+        "created_at": now_ms(),
+        "attachments": refs,
+        "mode": payload.mode,
+    }
+    initial_status = "正在生成图片…" if payload.mode == "image" else "正在思考与连接…"
+    assistant_id = uuid.uuid4().hex
+    assistant_placeholder = {
+        "id": assistant_id,
+        "role": "assistant",
+        "type": "image" if payload.mode == "image" else "text",
+        "content": "",
+        "created_at": now_ms(),
+        "status": "running",
+        "task_id": task_id,
+        "status_text": initial_status,
+        "mode": payload.mode,
+    }
+    conversation["messages"].append(user_message)
+    conversation["messages"].append(assistant_placeholder)
+    conversation["updated_at"] = now_ms()
+    save_conversation(user_id, conversation)
+
+    with CHAT_TASK_LOCK:
+        CHAT_TASKS[task_id] = {
+            "id": task_id,
+            "user_id": user_id,
+            "conversation_id": conversation["id"],
+            "message_id": assistant_id,
+            "mode": payload.mode,
+            "status": "running",
+            "finished": False,
+            "error": "",
+            "status_text": initial_status,
+            "stream_text": "",
+            "stream_reasoning": "",
+            "events": [],
+            "subscribers": [],
+            "created_at": now_ms(),
+            "updated_at": now_ms(),
+            "task_handle": None,
+        }
+        task_handle = asyncio.create_task(
+            run_chat_task(task_id, user_id, conversation["id"], assistant_id, payload, refs)
+        )
+        CHAT_TASKS[task_id]["task_handle"] = task_handle
+
+    return {
+        "task_id": task_id,
+        "conversation": conversation,
+        "message": assistant_placeholder,
+    }
+
+@app.get("/api/chat/tasks/{task_id}")
+async def get_chat_task(task_id: str, request: Request, x_user_id: str = Header(default="")):
+    user_id = safe_user_id(x_user_id, request)
+    with CHAT_TASK_LOCK:
+        task = CHAT_TASKS.get(task_id)
+        if not task or task.get("user_id") != user_id:
+            raise HTTPException(status_code=404, detail="对话任务不存在")
+        snap = {
+            "task_id": task_id,
+            "status": task.get("status"),
+            "finished": bool(task.get("finished")),
+            "error": task.get("error") or "",
+            "status_text": task.get("status_text") or "",
+            "conversation_id": task.get("conversation_id") or "",
+            "message_id": task.get("message_id") or "",
+            "created_at": task.get("created_at") or 0,
+            "updated_at": task.get("updated_at") or 0,
+        }
+    try:
+        conv = load_conversation(user_id, snap["conversation_id"])
+        snap["conversation"] = _reconcile_conversation_running_tasks(user_id, conv)
+    except HTTPException:
+        snap["conversation"] = None
+    return snap
+
+@app.get("/api/chat/tasks/{task_id}/stream")
+async def stream_chat_task(task_id: str, request: Request, x_user_id: str = Header(default="")):
+    user_id = safe_user_id(x_user_id, request)
+    with CHAT_TASK_LOCK:
+        task = CHAT_TASKS.get(task_id)
+        if not task or task.get("user_id") != user_id:
+            raise HTTPException(status_code=404, detail="对话任务不存在")
+        backlog = [copy.deepcopy(ev) for ev in task.get("events", [])]
+        is_done = bool(task.get("finished"))
+        queue = None if is_done else asyncio.Queue()
+        if queue is not None:
+            task["subscribers"].append(queue)
+
+    async def stream():
+        try:
+            for ev in backlog:
+                yield sse_event(ev)
+            if queue is not None:
+                while True:
+                    ev = await queue.get()
+                    if ev is None:
+                        break
+                    yield sse_event(ev)
+        finally:
+            if queue is not None:
+                with CHAT_TASK_LOCK:
+                    t = CHAT_TASKS.get(task_id)
+                    if t and queue in t.get("subscribers", []):
+                        t["subscribers"].remove(queue)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):

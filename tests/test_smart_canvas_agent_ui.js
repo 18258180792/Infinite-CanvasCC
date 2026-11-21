@@ -245,3 +245,180 @@ test('API Settings removes deprecated notice and supports smart relay & official
     assert.deepEqual(Array.from(curated.chat), ['gpt-4o', 'deepseek-chat']);
     assert.deepEqual(Array.from(curated.video), ['doubao-seedance-1-0-pro']);
 });
+
+test('Agent preset capsules live inside #saSysDrawer and local sidebar nav is removed', () => {
+    const drawerBlockMatch = agentSrc.match(/id="saSysDrawer"[\s\S]*?<!-- Messages Stream -->/);
+    assert.ok(drawerBlockMatch, '#saSysDrawer block should exist');
+    assert.ok(drawerBlockMatch[0].includes('id="saPresetStrip"'), '#saPresetStrip should be rendered inside #saSysDrawer');
+
+    const composerZoneMatch = agentSrc.match(/id="saMessages"><\/div>[\s\S]*?<div class="sa-composer-wrap">/);
+    assert.ok(composerZoneMatch, 'zone between #saMessages and .sa-composer-wrap should exist');
+    assert.ok(!composerZoneMatch[0].includes('saPresetStrip'), '#saPresetStrip should be hidden above chat composer');
+
+    assert.ok(!indexHtml.includes('id="local-nav-toggle"'), 'local-nav-toggle should be removed from sidebar');
+    assert.ok(!indexHtml.includes('id="local-nav-group"'), 'local-nav-group should be removed from sidebar');
+    assert.ok(indexHtml.includes("const DEFAULT_PAGE_ID = 'online';"), 'default page should be online');
+
+    const onlineHtml = fs.readFileSync(path.join(__dirname, '../static/online.html'), 'utf8');
+    assert.ok(onlineHtml.includes('function currentModelProfile()'), 'online.html should adapt parameters per model');
+    assert.ok(onlineHtml.includes('/api/canvas-image-tasks'), 'online.html should submit async image tasks');
+    assert.ok(unifiedCss.includes('.composer-card .input-thumb-add'), 'studio-unified.css should style LibTV composer reference slots');
+});
+
+test('GPT chat is renamed to Agent智能改图 and implements LibTV UI & popovers', () => {
+    const commonJs = fs.readFileSync(path.join(__dirname, '../static/js/i18n/common.js'), 'utf8');
+    const studioJs = fs.readFileSync(path.join(__dirname, '../static/js/i18n/studio.js'), 'utf8');
+    const gptHtml = fs.readFileSync(path.join(__dirname, '../static/gpt-chat.html'), 'utf8');
+
+    assert.ok(commonJs.includes('"nav.gpt": { zh: "Agent智能改图", en: "Agent Image Edit" }'));
+    assert.ok(studioJs.includes('"chat.title": { zh: "Agent智能改图", en: "Agent Image Edit" }'));
+    assert.ok(indexHtml.includes('data-i18n="nav.gpt">Agent智能改图</span>'));
+    assert.ok(gptHtml.includes('<title>Agent智能改图</title>'));
+
+    // Verify LibTV layout & upward floating popovers exist
+    assert.ok(gptHtml.includes('id="titleHistoryBtn"'));
+    assert.ok(gptHtml.includes('id="attachMenuPopover"'));
+    assert.ok(gptHtml.includes('id="modelPickerPopover"'));
+    assert.ok(gptHtml.includes('id="skillPickerPopover"'));
+    assert.ok(gptHtml.includes('id="modePickerPopover"'));
+    assert.ok(gptHtml.includes('id="assetPickerModal"'));
+    assert.ok(gptHtml.includes('function useImageAsReference('));
+    assert.ok(gptHtml.includes('function renderFormattedText('));
+
+    // Verify borderless assistant bubble in studio-unified.css dark mode override
+    const assistantDarkMatch = unifiedCss.match(/html\.studio-theme-dark body \.bubble\.assistant\s*\{[\s\S]*?\}/);
+    assert.ok(assistantDarkMatch && assistantDarkMatch[0].includes('background: transparent !important;'));
+
+    // Verify inline JS in gpt-chat.html has valid syntax
+    const scriptMatches = [...gptHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+    assert.ok(scriptMatches.length >= 2);
+    scriptMatches.forEach((m, idx) => {
+        assert.doesNotThrow(() => new vm.Script(m[1]), `gpt-chat.html inline script #${idx} must parse cleanly`);
+    });
+});
+
+test('Smart Canvas Agent implements LibTV UI, floating/docked toggle, magnetic snap, and formatted markdown', () => {
+    // 1. Verify DOM & CSS structures for dock/float, magnetic snap, body portal popovers, and LibTV details
+    [
+        'id="saDockToggleBtn"',
+        "dockSnapZone.id = 'saDockSnapZone'",
+        'id="saDockResizeHandle"',
+        'id="saFloatResizeHandle"',
+        "popoverPortal.id = 'saPopoverPortal'",
+        'id="saAttachPopover"',
+        'id="saSkillBtn"',
+        'id="saSkillPopover"',
+        'id="saModePopover"',
+        '切换为浮窗',
+        '停靠到右侧',
+        '手动生成',
+        '自动生成',
+        '思考过程',
+        '选择模型',
+        'renderAgentFormattedText',
+        'computeAgentFloatSnap'
+    ].forEach(token => {
+        assert.ok(agentSrc.includes(token), `smart-canvas-agent.js missing ${token}`);
+    });
+
+    [
+        '.sa-panel.is-docked',
+        '.sa-panel.is-floating',
+        '.sa-dock-snap-zone.visible',
+        'body.sa-panel-docked-open .smart-minimap',
+        '.sa-popover-portal',
+        '.sa-model-card-row',
+        '.sa-skill-row-item',
+        '.sa-mode-option-btn',
+        '.sa-reasoning-box',
+        '.sa-msg-text pre.sa-code-block'
+    ].forEach(sel => {
+        assert.ok(agentCss.includes(sel), `smart-canvas-agent.css missing ${sel}`);
+    });
+
+    // 2. Verify pure layout snap & markdown formatter inside isolated VM
+    const helperStart = agentSrc.indexOf('const AGENT_LAYOUT_DEFAULTS =');
+    const helperEnd = agentSrc.indexOf('/* ===== End Pure Agent Helpers ===== */', helperStart);
+    assert.ok(helperStart > 0 && helperEnd > helperStart, 'pure helper block markers must exist');
+
+    const sandbox = {
+        escapeHtml: s => String(s || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(agentSrc.slice(helperStart, helperEnd), sandbox);
+
+    // Dragging near right edge triggers right-dock snap
+    const dockSnap = sandbox.computeAgentFloatSnap(
+        { left: 1025, top: 90, width: 396, height: 640 },
+        1400,
+        1440,
+        900
+    );
+    assert.equal(dockSnap.shouldDock, true);
+
+    // Dragging near left + top edges magnetically snaps to safe gutters (left=14, top=56)
+    const leftTopSnap = sandbox.computeAgentFloatSnap(
+        { left: 26, top: 70, width: 396, height: 640 },
+        180,
+        1440,
+        900
+    );
+    assert.equal(leftTopSnap.shouldDock, false);
+    assert.equal(leftTopSnap.left, 14);
+    assert.equal(leftTopSnap.top, 56);
+    assert.deepEqual(Array.from(leftTopSnap.snappedEdges), ['left', 'top']);
+
+    // Dragging near bottom edge magnetically snaps to bottom gutter (900 - 640 - 14 = 246)
+    const bottomSnap = sandbox.computeAgentFloatSnap(
+        { left: 500, top: 238, width: 396, height: 640 },
+        650,
+        1440,
+        900
+    );
+    assert.equal(bottomSnap.shouldDock, false);
+    assert.equal(bottomSnap.left, 500);
+    assert.equal(bottomSnap.top, 246);
+    assert.deepEqual(Array.from(bottomSnap.snappedEdges), ['bottom']);
+
+    // Dragging in the center preserves coordinates without docking or snapping
+    const freeDrag = sandbox.computeAgentFloatSnap(
+        { left: 500, top: 180, width: 396, height: 640 },
+        650,
+        1440,
+        900
+    );
+    assert.equal(freeDrag.shouldDock, false);
+    assert.equal(freeDrag.left, 500);
+    assert.equal(freeDrag.top, 180);
+    assert.deepEqual(Array.from(freeDrag.snappedEdges), []);
+
+    // Formatted markdown escapes raw HTML and renders lists, strong, inline code, and code blocks
+    const fakeEl = { innerHTML: '' };
+    sandbox.renderAgentFormattedText(
+        fakeEl,
+        '你好 <script>alert(1)</script>\n\n- **生成素材**：角色与 `图片 1` 融合\n- 编辑合成\n\n```text\nclean prompt\n```'
+    );
+    assert.ok(!fakeEl.innerHTML.includes('<script>'));
+    assert.ok(fakeEl.innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+    assert.ok(fakeEl.innerHTML.includes('<ul><li><strong>生成素材</strong>：角色与 <code>图片 1</code> 融合</li><li>编辑合成</li></ul>'));
+    assert.ok(fakeEl.innerHTML.includes('<pre class="sa-code-block"><code>clean prompt\n</code></pre>'));
+});
+
+test('preset capsules are hidden and gpt-chat uses refresh-safe tasks & skill popover presets', () => {
+    const gptHtml = fs.readFileSync(path.join(__dirname, '../static/gpt-chat.html'), 'utf8');
+
+    assert.ok(agentSrc.includes('<div class="sa-sys-preset-section" hidden>'), 'canvas agent preset capsules section should be hidden');
+    assert.ok(agentCss.includes('.sa-sys-preset-section[hidden]') && agentCss.includes('display: none !important;'), 'canvas agent CSS must enforce hidden on preset section');
+
+    assert.ok(gptHtml.includes('<div id="sysPresetsQuick" class="sys-presets-quick" hidden>'), 'gpt-chat quick preset capsules should be hidden');
+    assert.ok(gptHtml.includes('.sys-presets-quick[hidden] { display:none !important; }'), 'gpt-chat CSS must enforce hidden on quick preset capsules');
+    assert.ok(gptHtml.includes('onclick="applySystemPreset(${item.idx})"'), 'gpt-chat skill popover presets should apply as system prompt');
+    assert.ok(gptHtml.includes("item.active ? '已应用' : '应用'"), 'gpt-chat skill popover presets should display 已应用/应用 state');
+    assert.ok(gptHtml.includes('/api/chat/tasks'), 'gpt-chat should submit to refresh-safe background chat tasks');
+    assert.ok(gptHtml.includes('function attachChatTaskStream('), 'gpt-chat should support attaching/re-attaching task SSE stream');
+    assert.ok(gptHtml.includes('function retryAssistantMessage('), 'gpt-chat should support retrying failed or interrupted replies');
+});

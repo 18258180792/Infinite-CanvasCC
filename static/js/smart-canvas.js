@@ -13239,8 +13239,8 @@ function loadPromptDraft(subject){
     }
 }
 // composer 文案区尺寸：宽度/高度按节点记在 runSettings（composerW / promptH / promptExpanded）。
-const COMPOSER_W_DEFAULT = 540;
-const COMPOSER_W_MIN = 420;
+const COMPOSER_W_DEFAULT = 572;
+const COMPOSER_W_MIN = 440;
 const COMPOSER_W_MAX = 960;
 const PROMPT_H_DEFAULT = 124;
 const PROMPT_H_MIN = 60;

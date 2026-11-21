@@ -320,56 +320,571 @@ html.theme-dark .asset-toggle:hover {
     border-radius: 16px !important;
 }
 
-/* Selected Node Top Floating Action Menu & Bottom Composer Card (LibTV Obsidian Match) */
+/* Selected Node Top Floating Action Menu & Bottom Composer Card (LibTV Obsidian & Daylight Delicacy) */
+.smart-node-floating-menu {
+    height: 32px !important;
+    padding: 3px 6px !important;
+    border-radius: 11px !important;
+    gap: 2px !important;
+}
+
+.smart-node-floating-menu button {
+    height: 25px !important;
+    padding: 0 9px !important;
+    border-radius: 8px !important;
+    font-size: 11px !important;
+    font-weight: 550 !important;
+    letter-spacing: 0.01em !important;
+}
+
 html.theme-dark .smart-node-floating-menu,
 html.studio-theme-dark .smart-node-floating-menu {
-    background: rgba(21, 22, 27, 0.95) !important;
-    border: 1px solid rgba(255, 255, 255, 0.09) !important;
-    border-radius: 12px !important;
-    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.52) !important;
+    background: rgba(19, 20, 25, 0.94) !important;
+    border: 1px solid rgba(255, 255, 255, 0.095) !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 16px 40px rgba(0, 0, 0, 0.56) !important;
+}
+
+html.theme-dark .smart-node-floating-menu button:hover,
+html.studio-theme-dark .smart-node-floating-menu button:hover {
+    background: rgba(255, 255, 255, 0.09) !important;
+    color: #ffffff !important;
+}
+
+/* Selected Node Frame, Ports & Hover-Only Resize Grip (Eliminate Permanent Corner Box Over Artwork) */
+.image-node:not(.empty-node):not(.group-node) .image-wrap > img,
+.image-node:not(.empty-node):not(.group-node) .image-wrap > .node-img,
+.image-node:not(.empty-node):not(.group-node) .image-wrap > .media-video-card {
+    border-radius: 14px !important;
+}
+
+html.theme-dark .image-node.selected:not(.empty-node):not(.group-node) .image-wrap > img,
+html.theme-dark .image-node.selected:not(.empty-node):not(.group-node) .image-wrap > .node-img,
+html.theme-dark .image-node.selected:not(.empty-node):not(.group-node) .image-wrap > .media-video-card,
+html.studio-theme-dark .image-node.selected:not(.empty-node):not(.group-node) .image-wrap > img,
+html.studio-theme-dark .image-node.selected:not(.empty-node):not(.group-node) .image-wrap > .node-img,
+html.studio-theme-dark .image-node.selected:not(.empty-node):not(.group-node) .image-wrap > .media-video-card {
+    border-color: rgba(255, 255, 255, 0.88) !important;
+    box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.88), 0 22px 54px rgba(0, 0, 0, 0.52) !important;
+}
+
+.image-node.selected .node-resize-handle {
+    opacity: 0 !important;
+}
+
+.image-node:hover .node-resize-handle {
+    opacity: 0.92 !important;
+}
+
+.node-resize-handle {
+    right: 6px !important;
+    bottom: 6px !important;
+    width: 16px !important;
+    height: 16px !important;
+    border-radius: 6px !important;
+    backdrop-filter: blur(8px) !important;
+}
+
+html.theme-dark .node-resize-handle,
+html.studio-theme-dark .node-resize-handle {
+    background: rgba(16, 17, 22, 0.68) !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    color: #d4d4d8 !important;
+}
+
+.node-port {
+    width: 12px !important;
+    height: 12px !important;
+    border-width: 1.75px !important;
+}
+
+.node-port.port-in {
+    left: -6px !important;
+}
+
+.node-port.port-out {
+    right: -6px !important;
+}
+
+html.theme-dark .node-port,
+html.studio-theme-dark .node-port {
+    background: #14151a !important;
+    border-color: rgba(255, 255, 255, 0.88) !important;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.48) !important;
+}
+
+html.theme-dark .node-port:hover,
+html.theme-dark .node-port.is-active,
+html.studio-theme-dark .node-port:hover,
+html.studio-theme-dark .node-port.is-active {
+    background: #38bdf8 !important;
+    border-color: #e0f2fe !important;
+    box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.24), 0 4px 12px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* LibTV Floating Node Composer Card (`#composer > .composer-card`) */
+.composer {
+    --ctrl-font: 11.5px !important;
+    --ctrl-icon: 12.5px !important;
+    --ctrl-height: 29px !important;
+    --ctrl-gap: 5px !important;
+    --ctrl-xpad: 10px !important;
+    --ctrl-pop-font: 11.5px !important;
+    --ctrl-pop-icon: 12px !important;
+    --ctrl-pop-height: 27px !important;
+    --ctrl-pop-radius: 9px !important;
+}
+
+.composer-card {
+    padding: 13px 14px 12px !important;
+    border-radius: 20px !important;
+    gap: 10px !important;
+    align-items: center !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card {
+    background: rgba(255, 255, 255, 0.97) !important;
+    border: 1px solid rgba(15, 23, 42, 0.085) !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 24px 58px rgba(15, 23, 42, 0.13) !important;
 }
 
 html.theme-dark .composer-card,
 html.studio-theme-dark .composer-card {
-    background: rgba(21, 22, 27, 0.97) !important;
-    border: 1px solid rgba(255, 255, 255, 0.085) !important;
-    border-radius: 18px !important;
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 28px 64px rgba(0, 0, 0, 0.56) !important;
+    background: rgba(20, 21, 26, 0.975) !important;
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.055) inset, 0 28px 68px rgba(0, 0, 0, 0.62) !important;
+}
+
+/* Composer Top Header: Custom Engine Capsule + Recessed Mode Switcher + Micro Utilities */
+.composer-card .composer-head {
+    min-height: 28px !important;
+    padding: 0 1px !important;
+    gap: 8px !important;
+}
+
+.composer-card .composer-head-left {
+    gap: 7px !important;
+}
+
+.composer-card .engine-select {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    height: 27px !important;
+    padding: 0 26px 0 11px !important;
+    border-radius: 9px !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.01em !important;
+    background-repeat: no-repeat !important;
+    background-position: right 8px center !important;
+    background-size: 11px 11px !important;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .engine-select {
+    background-color: #f4f5f8 !important;
+    border: 1px solid rgba(15, 23, 42, 0.08) !important;
+    color: #18181b !important;
+}
+
+html.theme-dark .composer-card .engine-select,
+html.studio-theme-dark .composer-card .engine-select {
+    background-color: rgba(255, 255, 255, 0.045) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    color: #e4e4e7 !important;
+}
+
+html.theme-dark .composer-card .engine-select:hover,
+html.studio-theme-dark .composer-card .engine-select:hover {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+    border-color: rgba(255, 255, 255, 0.16) !important;
+    color: #ffffff !important;
+}
+
+.composer-card .kind-toggle,
+.composer-card .image-mode-toggle {
+    height: 27px !important;
+    padding: 2px !important;
+    border-radius: 9px !important;
+    gap: 2px !important;
+}
+
+.composer-card .kind-toggle button,
+.composer-card .image-mode-toggle button {
+    height: 21px !important;
+    padding: 0 9px !important;
+    border-radius: 7px !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    gap: 4.5px !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .kind-toggle,
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .image-mode-toggle {
+    background: #f1f3f7 !important;
+    border: 1px solid rgba(15, 23, 42, 0.06) !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .kind-toggle button.active,
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .image-mode-toggle button.active {
+    background: #ffffff !important;
+    color: #111827 !important;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1) !important;
+}
+
+html.theme-dark .composer-card .kind-toggle,
+html.theme-dark .composer-card .image-mode-toggle,
+html.studio-theme-dark .composer-card .kind-toggle,
+html.studio-theme-dark .composer-card .image-mode-toggle {
+    background: rgba(255, 255, 255, 0.035) !important;
+    border: 1px solid rgba(255, 255, 255, 0.07) !important;
+}
+
+html.theme-dark .composer-card .kind-toggle button.active,
+html.theme-dark .composer-card .image-mode-toggle button.active,
+html.studio-theme-dark .composer-card .kind-toggle button.active,
+html.studio-theme-dark .composer-card .image-mode-toggle button.active {
+    background: rgba(255, 255, 255, 0.125) !important;
+    color: #f8fafc !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 2px 6px rgba(0, 0, 0, 0.25) !important;
+}
+
+.composer-card .composer-head-right {
+    gap: 4px !important;
+}
+
+.composer-card .prompt-char-count {
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    padding-right: 3px !important;
+    opacity: 0.78 !important;
+}
+
+.composer-card .composer-icon-btn {
+    width: 27px !important;
+    height: 27px !important;
+    border-radius: 8px !important;
+}
+
+/* Composer Reference Strip: Adjacent LibTV Reference Slots + Inset Glass Index Badge */
+.composer-card .input-thumbs-row {
+    justify-content: flex-start !important;
+    gap: 7px !important;
+    padding: 1px 1px 2px !important;
+}
+
+.composer-card .input-thumb-list {
+    gap: 7px !important;
+    padding: 2px 0 !important;
+}
+
+.composer-card .input-thumb-list.empty {
+    flex: 0 0 auto !important;
+    min-height: 0 !important;
+}
+
+.composer-card .input-thumb-actions {
+    margin-left: 0 !important;
+    gap: 6px !important;
+}
+
+.composer-card .input-thumb {
+    width: 46px !important;
+    height: 46px !important;
+    border-radius: 10px !important;
+    overflow: hidden !important;
+}
+
+html.theme-dark .composer-card .input-thumb,
+html.studio-theme-dark .composer-card .input-thumb {
+    border: 1px solid rgba(255, 255, 255, 0.13) !important;
+    background: #14151a !important;
+}
+
+html.theme-dark .composer-card .input-thumb.input-self,
+html.studio-theme-dark .composer-card .input-thumb.input-self {
+    border-color: rgba(255, 255, 255, 0.36) !important;
+    box-shadow: none !important;
+}
+
+.composer-card .input-thumb-label {
+    left: 3px !important;
+    top: 3px !important;
+    transform: none !important;
+    height: 15px !important;
+    padding: 0 5px !important;
+    border-radius: 5px !important;
+    font-size: 9px !important;
+    font-weight: 700 !important;
+    background: rgba(12, 13, 17, 0.72) !important;
+    border: 1px solid rgba(255, 255, 255, 0.16) !important;
+    backdrop-filter: blur(6px) !important;
+    color: #f8fafc !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28) !important;
+}
+
+.composer-card .input-thumb-remove {
+    right: 2px !important;
+    top: 2px !important;
+    width: 16px !important;
+    height: 16px !important;
+    border-radius: 5px !important;
+    opacity: 0 !important;
+    background: rgba(12, 13, 17, 0.82) !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+}
+
+.composer-card .input-thumb:hover .input-thumb-remove {
+    opacity: 1 !important;
+}
+
+.composer-card .input-thumb-add {
+    width: 46px !important;
+    height: 46px !important;
+    border-radius: 10px !important;
+    border-style: dashed !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .input-thumb-add {
+    background: #f8fafc !important;
+    border-color: rgba(15, 23, 42, 0.16) !important;
+    color: #64748b !important;
+}
+
+html.theme-dark .composer-card .input-thumb-add,
+html.studio-theme-dark .composer-card .input-thumb-add {
+    background: rgba(255, 255, 255, 0.025) !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    color: #9ca3af !important;
+}
+
+html.theme-dark .composer-card .input-thumb-add:hover,
+html.studio-theme-dark .composer-card .input-thumb-add:hover {
+    background: rgba(255, 255, 255, 0.065) !important;
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    color: #f4f4f5 !important;
+}
+
+/* Composer Prompt Input, Template Button & Seamless Fade Hint */
+.composer-card .prompt-input {
+    padding: 12px 44px 14px 14px !important;
+    border-radius: 14px !important;
+    font-size: 13.5px !important;
+    line-height: 1.68 !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .prompt-input {
+    background: #f6f7f9 !important;
+    border: 1px solid rgba(15, 23, 42, 0.07) !important;
+    color: #111827 !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .prompt-input:focus {
+    background: #ffffff !important;
+    border-color: rgba(15, 23, 42, 0.22) !important;
+    box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.04) !important;
 }
 
 html.theme-dark .composer-card .prompt-input,
 html.studio-theme-dark .composer-card .prompt-input {
     background: #131418 !important;
-    border: 1px solid rgba(255, 255, 255, 0.06) !important;
-    border-radius: 12px !important;
+    border: 1px solid rgba(255, 255, 255, 0.065) !important;
     color: #f3f4f6 !important;
+}
+
+html.theme-dark .composer-card .prompt-input:hover,
+html.studio-theme-dark .composer-card .prompt-input:hover {
+    border-color: rgba(255, 255, 255, 0.11) !important;
 }
 
 html.theme-dark .composer-card .prompt-input:focus,
 html.studio-theme-dark .composer-card .prompt-input:focus {
-    border-color: rgba(255, 255, 255, 0.18) !important;
+    border-color: rgba(255, 255, 255, 0.2) !important;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.035) !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .prompt-more-hint {
+    height: 46px !important;
+    border-radius: 0 0 13px 13px !important;
+    background: linear-gradient(180deg, rgba(246, 247, 249, 0) 0%, rgba(246, 247, 249, 0.88) 58%, #f6f7f9 100%) !important;
+}
+
+html.theme-dark .composer-card .prompt-more-hint,
+html.studio-theme-dark .composer-card .prompt-more-hint {
+    height: 46px !important;
+    border-radius: 0 0 13px 13px !important;
+    background: linear-gradient(180deg, rgba(19, 20, 24, 0) 0%, rgba(19, 20, 24, 0.86) 56%, #131418 100%) !important;
+    color: #a1a1aa !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+}
+
+html.theme-dark .composer-card .prompt-more-hint.visible:hover,
+html.studio-theme-dark .composer-card .prompt-more-hint.visible:hover {
+    color: #f4f4f5 !important;
+}
+
+.composer-card .composer-template-btn {
+    right: 9px !important;
+    top: 9px !important;
+    width: 28px !important;
+    height: 28px !important;
+    border-radius: 8px !important;
+}
+
+html.theme-dark .composer-card .composer-template-btn,
+html.studio-theme-dark .composer-card .composer-template-btn {
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    color: #a1a1aa !important;
     box-shadow: none !important;
+}
+
+html.theme-dark .composer-card .composer-template-btn:hover,
+html.studio-theme-dark .composer-card .composer-template-btn:hover {
+    background: rgba(255, 255, 255, 0.1) !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    color: #f4f4f5 !important;
 }
 
 html.theme-dark .composer-card .mention-image-token,
 html.studio-theme-dark .composer-card .mention-image-token {
-    background: rgba(255, 255, 255, 0.09) !important;
-    border: 1px solid rgba(255, 255, 255, 0.12) !important;
-    border-radius: 6px !important;
+    background: rgba(255, 255, 255, 0.095) !important;
+    border: 1px solid rgba(255, 255, 255, 0.13) !important;
+    border-radius: 7px !important;
     color: #f4f4f5 !important;
 }
 
-html.theme-dark .composer-card .run-btn,
-html.studio-theme-dark .composer-card .run-btn {
-    background: #f4f4f6 !important;
-    color: #0e0f12 !important;
-    border-radius: 999px !important;
-    font-weight: 700 !important;
+/* Composer Bottom Parameter Capsules, Popovers & Primary Run CTA */
+.composer-card .param-row {
+    gap: 6px !important;
+    row-gap: 6px !important;
 }
 
-html.theme-dark .composer-card .run-btn:hover,
-html.studio-theme-dark .composer-card .run-btn:hover {
+.composer-card .smart-pill {
+    height: 29px !important;
+    padding: 0 10px !important;
+    border-radius: 9px !important;
+    font-size: 11.5px !important;
+    font-weight: 550 !important;
+    gap: 5.5px !important;
+    max-width: 144px !important;
+}
+
+.composer-card .model-control .smart-pill {
+    max-width: 156px !important;
+}
+
+.composer-card .size-picker-pill {
+    max-width: none !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .smart-pill {
+    background: #f3f4f7 !important;
+    border: 1px solid rgba(15, 23, 42, 0.065) !important;
+    color: #1f2937 !important;
+}
+
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .smart-control:hover .smart-pill,
+html:not(.theme-dark):not(.studio-theme-dark) .composer-card .smart-control.pinned .smart-pill {
+    background: #eaecef !important;
+    border-color: rgba(15, 23, 42, 0.16) !important;
+    color: #0f172a !important;
+}
+
+html.theme-dark .composer-card .smart-pill,
+html.studio-theme-dark .composer-card .smart-pill {
+    background: rgba(255, 255, 255, 0.042) !important;
+    border: 1px solid rgba(255, 255, 255, 0.068) !important;
+    color: #d4d4d8 !important;
+}
+
+html.theme-dark .composer-card .smart-control:hover .smart-pill,
+html.studio-theme-dark .composer-card .smart-control:hover .smart-pill {
+    background: rgba(255, 255, 255, 0.085) !important;
+    border-color: rgba(255, 255, 255, 0.16) !important;
+    color: #ffffff !important;
+}
+
+html.theme-dark .composer-card .smart-control.pinned .smart-pill,
+html.studio-theme-dark .composer-card .smart-control.pinned .smart-pill {
+    background: rgba(255, 255, 255, 0.115) !important;
+    border-color: rgba(255, 255, 255, 0.24) !important;
+    color: #ffffff !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28) !important;
+}
+
+html.theme-dark .composer-card .smart-popover,
+html.studio-theme-dark .composer-card .smart-popover {
+    background: rgba(22, 23, 29, 0.98) !important;
+    border: 1px solid rgba(255, 255, 255, 0.11) !important;
+    border-radius: 14px !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 22px 54px rgba(0, 0, 0, 0.62) !important;
+}
+
+html.theme-dark .composer-card .direct-option:hover,
+html.theme-dark .composer-card .size-picker-option:hover,
+html.studio-theme-dark .composer-card .direct-option:hover,
+html.studio-theme-dark .composer-card .size-picker-option:hover {
+    background: rgba(255, 255, 255, 0.065) !important;
+    border-color: transparent !important;
+    color: #f4f4f5 !important;
+}
+
+html.theme-dark .composer-card .direct-option.active,
+html.theme-dark .composer-card .size-picker-option.active,
+html.studio-theme-dark .composer-card .direct-option.active,
+html.studio-theme-dark .composer-card .size-picker-option.active {
+    background: rgba(56, 189, 248, 0.14) !important;
+    border-color: rgba(56, 189, 248, 0.32) !important;
+    color: #e0f2fe !important;
+}
+
+.composer-card .run-btn:not(.cascade-run-btn) {
+    width: auto !important;
+    min-width: 72px !important;
+    height: 31px !important;
+    padding: 0 14px !important;
+    border-radius: 999px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    gap: 5px !important;
+    letter-spacing: 0.02em !important;
+}
+
+html.theme-dark .composer-card .run-btn:not(.cascade-run-btn),
+html.studio-theme-dark .composer-card .run-btn:not(.cascade-run-btn) {
+    background: #f4f4f6 !important;
+    color: #0e0f12 !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.34) !important;
+}
+
+html.theme-dark .composer-card .run-btn:not(.cascade-run-btn):hover:not(:disabled),
+html.studio-theme-dark .composer-card .run-btn:not(.cascade-run-btn):hover:not(:disabled) {
     background: #ffffff !important;
+    box-shadow: 0 6px 20px rgba(255, 255, 255, 0.14) !important;
+}
+
+.composer-card .cascade-run-btn {
+    height: 31px !important;
+    min-width: 82px !important;
+    padding: 0 11px !important;
+    border-radius: 999px !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+}
+
+html.theme-dark .composer-card .cascade-run-btn,
+html.studio-theme-dark .composer-card .cascade-run-btn {
+    background: rgba(255, 255, 255, 0.06) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    color: #e4e4e7 !important;
+}
+
+html.theme-dark .composer-card .cascade-run-btn:hover:not(:disabled),
+html.studio-theme-dark .composer-card .cascade-run-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.11) !important;
+    border-color: rgba(255, 255, 255, 0.22) !important;
+    color: #ffffff !important;
 }
 
 .composer-icon-btn.is-copied {
@@ -561,15 +1076,15 @@ html.studio-theme-dark body .action-btn.save-btn:hover {
     color: #09090b !important;
 }
 
-/* GPT Chat Inner Page Unified with Smart Canvas Agent */
+/* GPT Chat (Agent智能改图) Inner Page Unified with LibTV Agent Style */
 html.studio-theme-dark body .chat-shell,
 html.studio-theme-dark body .messages {
     background: #0e0f12 !important;
 }
 
 html.studio-theme-dark body .topbar {
-    background: rgba(14, 15, 18, 0.9) !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07) !important;
+    background: rgba(14, 15, 18, 0.88) !important;
+    border-bottom: 1px solid transparent !important;
 }
 
 html.studio-theme-dark body .composer-wrap {
@@ -577,30 +1092,31 @@ html.studio-theme-dark body .composer-wrap {
 }
 
 html.studio-theme-dark body .chat-shell .composer {
-    background: #16171c !important;
+    background: #1a1b20 !important;
     border: 1px solid rgba(255, 255, 255, 0.085) !important;
-    border-radius: 18px !important;
+    border-radius: 20px !important;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 20px 48px rgba(0, 0, 0, 0.45) !important;
 }
 
 html.studio-theme-dark body .chat-shell .composer-body {
-    background: #121317 !important;
-    border: 1px solid rgba(255, 255, 255, 0.07) !important;
-    border-radius: 13px !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
 }
 
 html.studio-theme-dark body .bubble.user {
-    background: #232429 !important;
+    background: #23242a !important;
     border: 1px solid rgba(255, 255, 255, 0.07) !important;
     color: #f4f4f5 !important;
-    border-radius: 14px !important;
+    border-radius: 16px !important;
 }
 
 html.studio-theme-dark body .bubble.assistant {
-    background: #16171c !important;
-    border: 1px solid rgba(255, 255, 255, 0.075) !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
     color: #e4e4e7 !important;
-    border-radius: 14px !important;
+    border-radius: 0 !important;
 }
 
 /* Asset Manager, API Settings & ComfyUI Settings Panels */

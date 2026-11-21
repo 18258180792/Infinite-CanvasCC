@@ -16,14 +16,14 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.21.2.1794902612"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.11.21.2.1794902611"></script>
-    <script src="/static/js/theme.js?v=2026.11.21.2.1795234217"></script>
-    <script src="/static/js/i18n.js?v=2026.11.21.2.1794902556"></script>
-    <script src="/static/js/image-preview.js?v=2026.11.21.2.1794902564"></script>
-    <script src="/static/js/history-bulk-manager.js?v=2026.11.21.2.1794902553"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.22.1.1794902612"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.11.22.1.1794902611"></script>
+    <script src="/static/js/theme.js?v=2026.11.22.1.1795234217"></script>
+    <script src="/static/js/i18n.js?v=2026.11.22.1.1794902556"></script>
+    <script src="/static/js/image-preview.js?v=2026.11.22.1.1794902564"></script>
+    <script src="/static/js/history-bulk-manager.js?v=2026.11.22.1.1794902553"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.11.21.2.1794902588');
+        @import url('/static/vendor/css/fonts.css?v=2026.11.22.1.1794902588');
         :root { --accent:#111827; --bg:#f9fafb; --card:#fff; --easing:cubic-bezier(0.4,0,0.2,1); }
         body { background:var(--bg); font-family:'Inter',-apple-system,sans-serif; color:var(--accent); -webkit-font-smoothing:antialiased; }
         .container-box { max-width:1280px; margin:0 auto; padding:0 40px; margin-top:50px; }
@@ -42,8 +42,13 @@
         .control-panel { background:#fff; border:1px solid #edf0f3; border-radius:24px; padding:12px; display:flex; flex-direction:column; gap:10px; }
         .control-label { display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:10px; font-weight:600; letter-spacing:.04em; }
         .size-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; align-items:start; }
+        .size-row.single-col { grid-template-columns:minmax(0,1fr); }
         .size-field { min-width:0; display:flex; flex-direction:column; gap:6px; }
         .size-select,.size-custom { width:100%; min-width:0; max-width:100%; height:34px; border:1px solid #edf2f7; border-radius:14px; background:#f8fafc; color:#111827; outline:none; padding:0 10px; font-size:11px; font-weight:700; }
+        .count-pill { grid-template-columns:repeat(4, minmax(0, 1fr)); border-radius:14px; gap:4px; width:100%; }
+        .count-option { height:28px; border-radius:10px; border:none; font-size:11px; font-weight:700; cursor:pointer; padding:0; }
+        .count-option:not(.active) { background:transparent; }
+        .count-option:not(.active):hover { color:#111827; }
         .size-select { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .size-select:disabled { opacity:.55; cursor:not-allowed; }
         .size-custom { display:none; background:#fff; }
@@ -55,6 +60,19 @@
         .size-fit-btn { height:34px; border:1px solid #edf2f7; border-radius:14px; background:#fff; color:#111827; padding:0 10px; font-size:10px; font-weight:800; white-space:nowrap; }
         .size-fit-btn:disabled { opacity:.45; cursor:not-allowed; }
         .mode-badge { font-size:9px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:#0f172a; background:#eef2ff; border:1px solid #e0e7ff; padding:2px 8px; border-radius:999px; }
+        .model-cap-box { font-size:11px; line-height:1.5; color:#64748b; background:#f8fafc; border:1px solid #edf2f7; border-radius:14px; padding:8px 11px; display:flex; flex-direction:column; gap:3px; }
+        .model-cap-box[hidden] { display:none !important; }
+        .model-cap-tags { display:flex; flex-wrap:wrap; gap:5px; }
+        .model-cap-tag { font-size:9.5px; font-weight:700; padding:1px 7px; border-radius:999px; background:#fff; border:1px solid #e2e8f0; color:#334155; }
+        .ref-slot-badge { position:absolute; left:6px; top:6px; z-index:9; font-size:9px; font-weight:800; padding:1px 6px; border-radius:999px; background:rgba(15,23,42,.72); color:#fff; backdrop-filter:blur(6px); pointer-events:none; }
+        .ref-disabled-banner { border:1px dashed #e2e8f0; border-radius:18px; padding:14px 16px; font-size:11.5px; color:#64748b; background:#f8fafc; text-align:center; }
+        .result-thumbs { position:absolute; left:50%; bottom:20px; transform:translateX(-50%); display:flex; gap:8px; padding:6px; border-radius:18px; background:rgba(15,23,42,.68); backdrop-filter:blur(12px); z-index:12; }
+        .result-thumb-btn { width:44px; height:44px; border-radius:10px; overflow:hidden; border:2px solid transparent; opacity:.68; transition:all .2s ease; padding:0; background:transparent; cursor:pointer; }
+        .result-thumb-btn.active,.result-thumb-btn:hover { opacity:1; border-color:#fff; transform:translateY(-1px); }
+        .result-thumb-btn img { width:100%; height:100%; object-fit:cover; display:block; }
+        html.studio-theme-dark .model-cap-box, body.studio-theme-dark .model-cap-box { background:rgba(255,255,255,.035); border-color:rgba(255,255,255,.08); color:#9ca3af; }
+        html.studio-theme-dark .model-cap-tag, body.studio-theme-dark .model-cap-tag { background:rgba(255,255,255,.06); border-color:rgba(255,255,255,.1); color:#e5e7eb; }
+        html.studio-theme-dark .ref-disabled-banner, body.studio-theme-dark .ref-disabled-banner { background:rgba(255,255,255,.03); border-color:rgba(255,255,255,.1); color:#9ca3af; }
         .masonry-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:20px; }
         @media (min-width:768px){ .masonry-grid{ grid-template-columns:repeat(4,1fr); } }
         @media (max-width:640px){ .size-row{ grid-template-columns:1fr; } }
@@ -63,7 +81,7 @@
         .gallery-lightbox { background:rgba(255,255,255,.99); backdrop-filter:blur(22px) saturate(1.05); }
         @keyframes fadeIn { from{opacity:0} to{opacity:1} }
     </style>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.21.2.1795232862">
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.22.1.1795232862">
     <style>
         html:not(.studio-theme-dark) body:not(.studio-theme-dark) #lightbox.gallery-lightbox {
             background: rgba(255,255,255,.99) !important;
@@ -71,7 +89,7 @@
             -webkit-backdrop-filter: blur(22px) saturate(1.05) !important;
         }
     </style>
-    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.21.2.1795234213">
+    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.22.1.1795276495">
 </head>
 <body>
     <div class="container-box min-h-screen flex flex-col">
@@ -95,28 +113,17 @@
                     <textarea id="promptInput" rows="5" class="nano-input w-full p-6 rounded-3xl text-sm outline-none resize-none placeholder-gray-300" placeholder="输入想生成或编辑的画面..." data-i18n-placeholder="online.promptPlaceholder"></textarea>
                 </section>
 
-                <section class="space-y-4">
-                    <div class="flex items-center gap-2 text-gray-400">
-                        <i data-lucide="images" class="w-3.5 h-3.5"></i>
-                        <span class="text-[10px] font-black uppercase tracking-widest" data-i18n="online.referenceImages">Reference Images</span>
+                <section id="refSection" class="space-y-4">
+                    <div class="flex items-center justify-between gap-2 text-gray-400">
+                        <div class="flex items-center gap-2">
+                            <i data-lucide="images" class="w-3.5 h-3.5"></i>
+                            <span class="text-[10px] font-black uppercase tracking-widest" data-i18n="online.referenceImages">Reference Images</span>
+                        </div>
+                        <span id="refFormatBadge" class="text-[10px] font-semibold text-gray-400"></span>
                     </div>
-                    <div class="grid grid-cols-3 gap-4">
-                        <div id="drop-zone-1" onclick="document.getElementById('file1').click()" class="upload-item group aspect-square rounded-2xl flex flex-col items-center justify-center cursor-pointer">
-                            <input type="file" id="file1" accept="image/*" class="hidden" onchange="handleFile(this.files[0],1)">
-                            <i data-lucide="plus" class="w-5 h-5 text-gray-300 group-hover:text-black"></i><span class="text-[9px] mt-2 font-bold text-gray-400 uppercase">Main</span>
-                            <img id="prev1" class="preview-img hidden"><button id="del1" onclick="clearSlot(1,event)" class="hidden absolute top-2 right-2 w-6 h-6 bg-white/90 rounded-full shadow-sm z-10">×</button>
-                        </div>
-                        <div id="drop-zone-2" onclick="document.getElementById('file2').click()" class="upload-item group aspect-square rounded-2xl flex flex-col items-center justify-center cursor-pointer">
-                            <input type="file" id="file2" accept="image/*" class="hidden" onchange="handleFile(this.files[0],2)">
-                            <i data-lucide="plus" class="w-5 h-5 text-gray-300 group-hover:text-black"></i><span class="text-[9px] mt-2 font-bold text-gray-400 uppercase">Aux A</span>
-                            <img id="prev2" class="preview-img hidden"><button id="del2" onclick="clearSlot(2,event)" class="hidden absolute top-2 right-2 w-6 h-6 bg-white/90 rounded-full shadow-sm z-10">×</button>
-                        </div>
-                        <div id="drop-zone-3" onclick="document.getElementById('file3').click()" class="upload-item group aspect-square rounded-2xl flex flex-col items-center justify-center cursor-pointer">
-                            <input type="file" id="file3" accept="image/*" class="hidden" onchange="handleFile(this.files[0],3)">
-                            <i data-lucide="plus" class="w-5 h-5 text-gray-300 group-hover:text-black"></i><span class="text-[9px] mt-2 font-bold text-gray-400 uppercase">Aux B</span>
-                            <img id="prev3" class="preview-img hidden"><button id="del3" onclick="clearSlot(3,event)" class="hidden absolute top-2 right-2 w-6 h-6 bg-white/90 rounded-full shadow-sm z-10">×</button>
-                        </div>
-                    </div>
+                    <input type="file" id="multiRefInput" accept="image/*,.gif,.bmp,.avif,.tif,.tiff,.webp" multiple class="hidden" onchange="handleBatchFiles(this.files); this.value='';">
+                    <div id="refDisabledNotice" class="ref-disabled-banner hidden"></div>
+                    <div id="refGrid" class="grid grid-cols-3 sm:grid-cols-4 gap-3"></div>
                 </section>
 
                 <div class="tool-panel">
@@ -133,6 +140,10 @@
                             <select id="modelSelect" class="size-select" onchange="setModel(this.value)"></select>
                         </label>
                     </div>
+                    <div id="modelCapBox" class="model-cap-box" hidden>
+                        <div id="modelCapTags" class="model-cap-tags"></div>
+                        <div id="modelCapText"></div>
+                    </div>
                     <div id="adaptiveExtras" class="size-row" style="margin-top:2px;">
                         <label id="qualityField" class="size-field">
                             <select id="qualitySelect" class="size-select" onchange="setQuality(this.value)" title="Quality">
@@ -142,20 +153,21 @@
                                 <option value="high" data-i18n="online.qualityHigh">高</option>
                             </select>
                         </label>
-                        <label id="countField" class="size-field">
-                            <select id="countSelect" class="size-select" onchange="setCount(this.value)" title="Count">
-                                <option value="1" selected>×1</option>
-                                <option value="2">×2</option>
-                                <option value="3">×3</option>
-                                <option value="4">×4</option>
-                            </select>
-                        </label>
+                        <div id="countField" class="size-field">
+                            <div id="countSelect" class="model-pill count-pill" role="group" aria-label="Count" title="Count">
+                                <button type="button" class="model-option count-option active" data-count="1" aria-pressed="true" onclick="setCount(1)">×1</button>
+                                <button type="button" class="model-option count-option" data-count="2" aria-pressed="false" onclick="setCount(2)">×2</button>
+                                <button type="button" class="model-option count-option" data-count="3" aria-pressed="false" onclick="setCount(3)">×3</button>
+                                <button type="button" class="model-option count-option" data-count="4" aria-pressed="false" onclick="setCount(4)">×4</button>
+                            </div>
+                        </div>
                     </div>
                     <div class="control-label mt-1">
                         <i data-lucide="ruler" class="w-3.5 h-3.5"></i>
                         <span data-i18n="online.size">Size</span>
+                        <span id="resolvedSizeBadge" class="text-[10px] font-bold text-gray-400" style="margin-left:auto;"></span>
                     </div>
-                    <div class="size-row">
+                    <div id="sizeControlsRow" class="size-row">
                         <label id="resolutionField" class="size-field">
                             <select id="resolutionSelect" class="size-select" onchange="setResolution(this.value)">
                                 <option value="1k" selected>1K</option>
@@ -179,6 +191,8 @@
                                 <option value="landscape43">4:3 横图</option>
                                 <option value="story" data-i18n="online.story">9:16 竖屏</option>
                                 <option value="wide" data-i18n="online.wide">16:9 宽屏</option>
+                                <option value="cinema">21:9 电影宽屏</option>
+                                <option value="tall">9:21 超竖屏</option>
                                 <option value="custom" data-i18n="online.customRatio">自定义比例</option>
                             </select>
                             <span class="size-pair">
@@ -198,8 +212,9 @@
             <div class="lg:col-span-7">
                 <div id="resultBox" class="result-frame min-h-[500px] lg:h-full flex items-center justify-center relative overflow-hidden">
                     <div id="placeholder" class="text-center space-y-4 opacity-20"><i data-lucide="layout" class="w-12 h-12 mx-auto stroke-[1px]"></i><p class="text-[10px] font-black tracking-[0.5em] uppercase" data-i18n="online.canvasReady">Canvas Ready</p></div>
-                    <div id="loader" class="hidden text-center space-y-4"><div class="w-8 h-8 border-2 border-black border-t-transparent rounded-full animate-spin mx-auto"></div><p class="text-[10px] font-black tracking-[0.5em] uppercase" data-i18n="online.generating">Generating</p></div>
+                    <div id="loader" class="hidden text-center space-y-4"><div class="w-8 h-8 border-2 border-black border-t-transparent rounded-full animate-spin mx-auto"></div><p class="text-[10px] font-black tracking-[0.5em] uppercase" data-i18n="online.generating">Generating</p><p id="loaderStatus" class="text-[11px] text-gray-400 font-medium"></p></div>
                     <img id="outputImg" class="hidden w-full h-full object-contain p-8 cursor-zoom-in" onclick="zoomImage()">
+                    <div id="resultThumbStrip" class="result-thumbs hidden"></div>
                     <a id="downloadBtn" href="#" download class="hidden absolute top-8 right-8 w-12 h-12 bg-white/90 shadow-2xl rounded-2xl flex items-center justify-center hover:bg-black hover:text-white"><i data-lucide="download" class="w-4 h-4"></i></a>
                 </div>
             </div>
@@ -220,6 +235,7 @@
                 <div data-no-pan class="absolute top-6 left-6 bg-black/50 backdrop-blur-md text-white px-3 py-1.5 rounded-xl text-[10px] font-black tracking-widest shadow-2xl pointer-events-auto z-10">
                     <span id="lightboxRes">0x0</span>
                 </div>
+                <div id="lightboxThumbStrip" data-no-pan class="result-thumbs hidden pointer-events-auto"></div>
                 <button id="lightboxDownload" onclick="downloadLightboxImage(event)" data-no-pan class="absolute top-6 right-6 bg-black text-white w-12 h-12 rounded-2xl flex items-center justify-center shadow-2xl hover:scale-105 transition-transform pointer-events-auto z-10">
                     <i data-lucide="download" class="w-5 h-5"></i>
                 </button>
@@ -237,23 +253,26 @@
     <script>
         lucide.createIcons();
         function tr(key){ return window.StudioI18n ? StudioI18n.t(key) : key; }
+        function isEn(){ return window.StudioI18n?.lang?.() === 'en'; }
+        function uiText(zh, en){ return isEn() ? en : zh; }
         function applyLanguage(lang){
             if(lang && window.StudioI18n) StudioI18n.set(lang);
             document.title = tr('online.title');
             const loader = document.getElementById('loadMoreTrigger');
             if(loader && !isLoading) loader.innerText = tr('online.loadMore');
+            updateAdaptivePanel();
         }
         window.addEventListener('message', event => {
             if(event.data?.type === 'studio-lang') applyLanguage(event.data.lang);
-            // API 设置页通过 postMessage 通知平台/模型变更（iframe 内嵌场景）
             if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed') scheduleProviderRefresh();
         });
         window.addEventListener('studio-lang-change', () => {
             document.title = tr('online.title');
             updateAdaptivePanel();
         });
-        let refs = {1:null,2:null,3:null};
-        let refDims = {1:null,2:null,3:null};
+
+        const MAX_REFERENCE_SLOTS = 8;
+        let refItems = []; // [{ url, name, kind, mime, previewUrl, dim, isTranscoded }]
         let provider = 'comfly';
         let selectedModel = 'gpt-image-2';
         let apiProviders = [];
@@ -266,47 +285,78 @@
         let quality = 'auto';
         let outputCount = 1;
         let models = {gpt:'gpt-image-2', nano:'nano-banana-pro'};
-        let allHistory = [], currentIndex = 0, currentResult = null, currentLightboxData = null, isLoading = false;
+        let allHistory = [], currentIndex = 0, currentResult = null, currentResultIdx = 0, currentLightboxData = null, currentLightboxIdx = 0, isLoading = false;
         const PAGE_SIZE = 24;
+
+        const RATIO_CODE_MAP = {
+            square: '1:1',
+            portrait: '2:3',
+            landscape: '3:2',
+            portrait43: '3:4',
+            landscape43: '4:3',
+            story: '9:16',
+            wide: '16:9',
+            cinema: '21:9',
+            tall: '9:21',
+        };
         const SIZE_OPTIONS = {
             square: [
                 ['1024x1024', '1k'],
+                ['1536x1536', '1.5k'],
                 ['2048x2048', '2k'],
-                ['3840x2160', '4k']
+                ['2880x2880', '4k']
             ],
             portrait: [
                 ['1024x1536', '1k'],
+                ['1152x1728', '1.5k'],
                 ['1360x2048', '2k'],
                 ['2352x3520', '4k']
             ],
             portrait43: [
                 ['1008x1344', '1k'],
+                ['1296x1728', '1.5k'],
                 ['1536x2048', '2k'],
                 ['2448x3264', '4k']
             ],
             landscape43: [
                 ['1344x1008', '1k'],
+                ['1728x1296', '1.5k'],
                 ['2048x1536', '2k'],
                 ['3264x2448', '4k']
             ],
             landscape: [
                 ['1536x1024', '1k'],
+                ['1728x1152', '1.5k'],
                 ['2048x1360', '2k'],
                 ['3520x2352', '4k']
             ],
             story: [
                 ['720x1280', '1k'],
+                ['960x1712', '1.5k'],
                 ['1152x2048', '2k'],
                 ['2160x3840', '4k']
             ],
             wide: [
                 ['1280x720', '1k'],
+                ['1712x960', '1.5k'],
                 ['2048x1152', '2k'],
                 ['3840x2160', '4k']
+            ],
+            cinema: [
+                ['1344x576', '1k'],
+                ['1792x768', '1.5k'],
+                ['2240x960', '2k'],
+                ['3840x1648', '4k']
+            ],
+            tall: [
+                ['576x1344', '1k'],
+                ['768x1792', '1.5k'],
+                ['960x2240', '2k'],
+                ['1648x3840', '4k']
             ]
         };
-        const RES_LONG_SIDE = { '1k': 1536, '2k': 2048, '4k': 3840 };
-        const RES_PIXEL_LIMIT = { '1k': 1572864, '2k': 4194304, '4k': 8294400 };
+        const RES_LONG_SIDE = { '1k': 1536, '1.5k': 1792, '2k': 2048, '4k': 3840 };
+        const RES_PIXEL_LIMIT = { '1k': 1572864, '1.5k': 2621440, '2k': 4194304, '4k': 8294400 };
 
         function uniqueModels(list){
             const seen = new Set();
@@ -314,7 +364,7 @@
         }
         function imageProviders(){
             const list = (apiProviders || []).filter(p => p.enabled !== false && (
-                (p.image_models || []).length || (p.rh_apps || []).length || (p.rh_workflows || []).length
+                (p.image_models || []).length || (p.rh_apps || []).length || (p.rh_workflows || []).length || String(p.protocol || '').toLowerCase() === 'volcengine'
             ));
             return list.length ? list : [{id:'comfly', name:'Comfly', image_models:[models.gpt, models.nano]}];
         }
@@ -322,10 +372,10 @@
             return imageProviders().find(p => p.id === id) || imageProviders()[0];
         }
         function providerModels(id){
-            return uniqueModels(providerById(id)?.image_models || [models.gpt]);
+            const p = providerById(id) || {};
+            const fallback = String(p.protocol || '').toLowerCase() === 'volcengine' ? ['doubao-seedream-5-0-260128'] : [models.gpt];
+            return uniqueModels((p.image_models && p.image_models.length) ? p.image_models : fallback);
         }
-        /* ---- RunningHub：同一平台下同步模型 API / 工作流 / AI 应用。
-         * 模型 API 直接提交原始模型名；value=app:ID / workflow:ID 走 RH 应用/工作流路径。 */
         function runningHubEntryId(entry, kind){
             if(!entry || typeof entry !== 'object') return '';
             const raw = kind === 'model' ? (entry.model || entry.id || entry.name)
@@ -339,10 +389,115 @@
                 .filter(e => e && e.enabled !== false && e.hidden !== true)
                 .map(e => ({ kind, id: runningHubEntryId(e, kind), title: String(e.title || e.note || '').trim() }))
                 .filter(e => e.id);
-            const models = uniqueModels(p.image_models || []).map(model => ({kind:'model', id:model, title:model}));
-            return [...models, ...collect(p.rh_workflows, 'workflow'), ...collect(p.rh_apps, 'app')];
+            const mList = uniqueModels(p.image_models || []).map(model => ({kind:'model', id:model, title:model}));
+            return [...mList, ...collect(p.rh_workflows, 'workflow'), ...collect(p.rh_apps, 'app')];
         }
         function isRunningHubProvider(id){ return providerProtocol(id) === 'runninghub'; }
+
+        function providerProtocol(id, modelId = ''){
+            const p = providerById(id) || {};
+            const modelOverrides = p.model_protocols && typeof p.model_protocols === 'object' ? p.model_protocols : {};
+            const overrideProto = modelId && modelOverrides[modelId] ? String(modelOverrides[modelId]).toLowerCase() : '';
+            const proto = overrideProto || String(p.protocol || '').toLowerCase();
+            const pid = String(p.id || '').toLowerCase();
+            const base = String(p.base_url || '').toLowerCase();
+            if(proto === 'modelscope' || pid === 'modelscope') return 'modelscope';
+            if(proto === 'runninghub' || pid === 'runninghub') return 'runninghub';
+            if(proto === 'jimeng' || pid === 'jimeng') return 'jimeng';
+            if(proto === 'volcengine' || pid === 'volcengine') return 'volcengine';
+            if(proto === 'gemini') return 'gemini';
+            if(proto === 'apimart' || base.includes('apimart.ai')) return 'apimart';
+            return 'api';
+        }
+
+        function currentModelProfile(){
+            const p = providerById(provider) || {};
+            const m = String(selectedModel || '').trim();
+            const ml = m.toLowerCase();
+            const proto = providerProtocol(provider, m);
+            const reqMode = String(p.image_request_mode || 'openai').toLowerCase();
+            const base = String(p.base_url || '').toLowerCase();
+            const isSoonStudio = base.includes('soonstudio.ai');
+            const isGpt2 = /(^|[-_/])gpt-?image-?2($|[-_/.])/i.test(ml);
+            const isGpt1 = !isGpt2 && (/(^|[-_/])gpt-?image-?1(\.5|-mini)?($|[-_/.])/i.test(ml) || ml.startsWith('chatgpt-image'));
+            const isDalle3 = /(^|[-_/])dall-?e-?3($|[-_/])/i.test(ml);
+            const isDalle2 = /(^|[-_/])dall-?e-?2($|[-_/])/i.test(ml);
+            const isNanoOrGemini = proto === 'gemini' || ml.includes('nano-banana') || ml.includes('gemini-') || ml.startsWith('imagen');
+            const isSeedream = ml.includes('seedream');
+            const isSeedreamFlash = ml === 'dola-seedream-5.0-flash';
+            const isChatImage = reqMode === 'openai-chat' || /(^|[-_/])(gpt-4o-image|gpt-4o-all|sora[-_]image)/i.test(ml);
+            const isPureT2I = isDalle3 || ml.includes('z-image') || /(^|[-_/])t2i($|[-_/])|text-to-image/i.test(ml);
+            const isSingleRef = !isPureT2I && (isDalle2 || ml.includes('kontext'));
+
+            let endpointTag = '/v1/images/generations';
+            if(proto === 'runninghub') endpointTag = m.startsWith('workflow:') || m.startsWith('app:') ? 'RH 工作流/应用任务' : 'RH OpenAPI v2';
+            else if(proto === 'modelscope') endpointTag = 'ModelScope 异步任务';
+            else if(proto === 'volcengine') endpointTag = '/api/v3/images/generations';
+            else if(proto === 'jimeng') endpointTag = '即梦 CLI 异步任务';
+            else if(reqMode === 'grsai') endpointTag = 'Grsai /v1/api/generate';
+            else if(proto === 'gemini' && !base.includes('apimart')) endpointTag = 'Gemini :generateContent';
+            else if(reqMode === 'openai-responses') endpointTag = 'OpenAI /v1/responses (RS)';
+            else if(reqMode === 'openai-json') endpointTag = 'OpenAI JSON (extra_body)';
+            else if(reqMode === 'openai-video-proxy') endpointTag = '异步代理 /v1/videos';
+            else if(isChatImage) endpointTag = '/v1/chat/completions';
+            else if(isSoonStudio && isSeedream) endpointTag = 'SoonStudio 异步 JSON';
+            else if(proto === 'apimart') endpointTag = 'APIMart /v1/images/generations';
+            else if(isGpt2 || isGpt1 || isDalle2) endpointTag = '文生图 /generations · 改图 /edits';
+
+            const maxRefs = isPureT2I ? 0 : (isSingleRef ? 1 : (reqMode === 'openai-video-proxy' ? 6 : MAX_REFERENCE_SLOTS));
+            let qualityMode = 'none';
+            if(isDalle3) qualityMode = 'dalle3';
+            else if((proto === 'api' || proto === 'apimart') && !isDalle2 && !isChatImage && !(isSoonStudio && isSeedream) && reqMode !== 'grsai' && reqMode !== 'openai-json' && reqMode !== 'openai-video-proxy') {
+                qualityMode = 'gpt';
+            }
+
+            let resolutions = ['1k', '2k', '4k', 'custom'];
+            let defaultRes = '1k';
+            if(isSeedreamFlash){
+                resolutions = ['1k', '1.5k', '2k'];
+                defaultRes = '2k';
+            } else if(isSoonStudio && isSeedream){
+                resolutions = ml.includes('4k') || ml.includes('v5.5') ? ['1k', '2k', '4k'] : ['1k', '2k'];
+                defaultRes = '2k';
+            } else if(proto === 'volcengine' && isSeedream){
+                resolutions = ['2k', '4k', 'custom'];
+                defaultRes = '2k';
+            } else if(isGpt2){
+                resolutions = ['auto', '1k', '2k', '4k', 'custom'];
+                defaultRes = '1k';
+            } else if(isGpt1){
+                resolutions = ['auto', '1k'];
+                defaultRes = 'auto';
+            } else if(isDalle3){
+                resolutions = ['1k'];
+                defaultRes = '1k';
+            } else if(isDalle2){
+                resolutions = ['256', '512', '1k'];
+                defaultRes = '1k';
+            } else if(isNanoOrGemini || reqMode === 'grsai'){
+                resolutions = ['1k', '2k', '4k'];
+                defaultRes = ml.includes('4k') ? '4k' : '2k';
+            }
+
+            let allowedRatios = ['', 'square', 'portrait', 'landscape', 'portrait43', 'landscape43', 'story', 'wide', 'cinema', 'tall', 'custom'];
+            if(isGpt1) allowedRatios = ['square', 'landscape', 'portrait'];
+            else if(isDalle3) allowedRatios = ['square', 'wide', 'story'];
+            else if(isDalle2) allowedRatios = ['square'];
+            else if(isSoonStudio && isSeedream) allowedRatios = ['square'];
+
+            const formatNote = maxRefs === 0
+                ? uiText('当前模型为纯文生图模型，不支持参考图输入', 'Text-to-image only; reference images are not used')
+                : (isDalle2
+                    ? uiText('支持 1 张参考图 · 自动转换为 OpenAI 要求的方形 RGBA PNG', '1 reference image · auto-converted to square RGBA PNG')
+                    : uiText(`支持最多 ${maxRefs} 张参考图 · PNG/JPG/WEBP 直传，GIF/BMP/AVIF 自动无损转码`, `Up to ${maxRefs} refs · PNG/JPG/WEBP + auto GIF/BMP/AVIF transcoding`));
+
+            return {
+                proto, reqMode, endpointTag, maxRefs, qualityMode,
+                resolutions, defaultRes, allowedRatios, formatNote,
+                isGpt2, isGpt1, isDalle3, isDalle2, isNanoOrGemini, isSeedream, isSoonStudio, isChatImage
+            };
+        }
+
         function renderProviderControls(){
             const providerSelect = document.getElementById('providerSelect');
             const modelSelect = document.getElementById('modelSelect');
@@ -369,49 +524,126 @@
             updateAdaptivePanel();
         }
 
-        /* ---- 协议自适应：根据所选 provider 的 protocol 调整参数栏 ----
-         * 后端 /api/online-image → generate_ai_image 已按协议分发，前端只需让
-         * 与协议无关的控件随之显隐：质量仅 OpenAI 系（gpt-image）生效，其余协议忽略。 */
-        function providerProtocol(id){
-            const p = providerById(id) || {};
-            const proto = String(p.protocol || '').toLowerCase();
-            const pid = String(p.id || '').toLowerCase();
-            const base = String(p.base_url || '').toLowerCase();
-            if(proto === 'modelscope' || pid === 'modelscope') return 'modelscope';
-            if(proto === 'runninghub' || pid === 'runninghub') return 'runninghub';
-            if(proto === 'jimeng' || pid === 'jimeng') return 'jimeng';
-            if(proto === 'volcengine' || pid === 'volcengine') return 'volcengine';
-            if(proto === 'gemini') return 'gemini';
-            if(proto === 'apimart' || base.includes('apimart.ai')) return 'apimart';
-            return 'api';
-        }
         const PROTOCOL_BADGE = {
             api:'online.modeApi', apimart:'online.modeApi', modelscope:'online.modeModelscope',
             runninghub:'online.modeRunningHub', jimeng:'online.modeJimeng',
             volcengine:'online.modeVolcengine', gemini:'online.modeGemini'
         };
-        // 仅 OpenAI / APIMart（gpt-image 系）后端会消费 quality；其它协议忽略，隐藏以免误导。
-        const QUALITY_PROTOCOLS = new Set(['api','apimart']);
+
         function updateAdaptivePanel(){
-            const proto = providerProtocol(provider);
+            const profile = currentModelProfile();
             const badge = document.getElementById('providerModeBadge');
             if(badge){
-                badge.textContent = tr(PROTOCOL_BADGE[proto] || 'online.modeApi');
+                badge.textContent = tr(PROTOCOL_BADGE[profile.proto] || 'online.modeApi');
                 badge.style.display = '';
             }
+            const capTags = document.getElementById('modelCapTags');
+            const capText = document.getElementById('modelCapText');
+            if(capTags){
+                const tags = [profile.endpointTag];
+                if(profile.maxRefs === 0) tags.push(uiText('纯文生图', 'T2I Only'));
+                else tags.push(uiText(`参考图 ≤${profile.maxRefs}`, `Refs ≤${profile.maxRefs}`));
+                if(profile.maxRefs > 0) tags.push(uiText('GIF/BMP自动转码', 'GIF Auto-Convert'));
+                capTags.innerHTML = tags.map(t => `<span class="model-cap-tag">${escapeHtml(t)}</span>`).join('');
+            }
+            if(capText) capText.textContent = profile.formatNote;
+
             const qf = document.getElementById('qualityField');
-            if(qf) qf.style.display = QUALITY_PROTOCOLS.has(proto) ? '' : 'none';
             const qs = document.getElementById('qualitySelect');
-            if(qs) qs.value = quality;
-            // RunningHub 每次出图都是一次完整工作流运行，隐藏数量并固定为 1，避免误触发多次昂贵任务。
-            if(proto === 'runninghub') outputCount = 1;
+            const showQuality = profile.qualityMode !== 'none';
+            if(qf && qs){
+                if(!showQuality){
+                    qf.style.display = 'none';
+                } else {
+                    qf.style.display = '';
+                    if(profile.qualityMode === 'dalle3'){
+                        if(!['standard', 'hd'].includes(quality)) quality = 'standard';
+                        qs.innerHTML = [
+                            `<option value="standard">${escapeHtml(uiText('标准 Standard', 'Standard'))}</option>`,
+                            `<option value="hd">${escapeHtml(uiText('高清 HD', 'HD'))}</option>`
+                        ].join('');
+                    } else {
+                        if(!['auto', 'low', 'medium', 'high'].includes(quality)) quality = 'auto';
+                        qs.innerHTML = [
+                            `<option value="auto">${escapeHtml(tr('online.qualityAuto'))}</option>`,
+                            `<option value="low">${escapeHtml(tr('online.qualityLow'))}</option>`,
+                            `<option value="medium">${escapeHtml(tr('online.qualityMedium'))}</option>`,
+                            `<option value="high">${escapeHtml(tr('online.qualityHigh'))}</option>`
+                        ].join('');
+                    }
+                    qs.value = quality;
+                }
+            }
+
+            if(profile.proto === 'runninghub') outputCount = 1;
+            const showCount = profile.proto !== 'runninghub';
             const cf = document.getElementById('countField');
-            if(cf) cf.style.display = (proto === 'runninghub') ? 'none' : '';
-            const cs = document.getElementById('countSelect');
-            if(cs) cs.value = String(outputCount);
+            if(cf) cf.style.display = showCount ? '' : 'none';
+            const extras = document.getElementById('adaptiveExtras');
+            if(extras){
+                extras.style.display = (showQuality || showCount) ? '' : 'none';
+                extras.classList.toggle('single-col', !(showQuality && showCount));
+            }
+            syncCountButtons();
+
+            const resSelect = document.getElementById('resolutionSelect');
+            if(resSelect){
+                if(!profile.resolutions.includes(resolution)){
+                    resolution = profile.defaultRes;
+                }
+                const resLabels = {
+                    auto: uiText('自动尺寸 (Auto)', 'Auto Size'),
+                    '256': '256×256',
+                    '512': '512×512',
+                    '1k': '1K',
+                    '1.5k': '1.5K',
+                    '2k': '2K',
+                    '4k': '4K',
+                    custom: tr('online.customSize'),
+                };
+                resSelect.innerHTML = profile.resolutions.map(v => `<option value="${v}">${escapeHtml(resLabels[v] || v.toUpperCase())}</option>`).join('');
+                resSelect.value = resolution;
+            }
+
+            const ratioSelect = document.getElementById('ratioSelect');
+            if(ratioSelect){
+                if(!profile.allowedRatios.includes(ratio)){
+                    ratio = profile.allowedRatios.includes('square') ? 'square' : profile.allowedRatios[0];
+                }
+                const ratioLabels = {
+                    '': tr('online.emptyRatio'),
+                    square: tr('online.square'),
+                    portrait: tr('online.portrait'),
+                    landscape: tr('online.landscape'),
+                    portrait43: uiText('3:4 竖图', '3:4 Portrait'),
+                    landscape43: uiText('4:3 横图', '4:3 Landscape'),
+                    story: tr('online.story'),
+                    wide: tr('online.wide'),
+                    cinema: uiText('21:9 电影宽屏', '21:9 Cinema'),
+                    tall: uiText('9:21 超竖屏', '9:21 Tall'),
+                    custom: tr('online.customRatio'),
+                };
+                ratioSelect.innerHTML = profile.allowedRatios.map(v => `<option value="${v}">${escapeHtml(ratioLabels[v] || v)}</option>`).join('');
+                ratioSelect.value = ratio;
+            }
+
+            renderRefGrid();
+            updateSizeUI();
         }
         function setQuality(next){ quality = next || 'auto'; }
-        function setCount(next){ outputCount = Math.max(1, Math.min(4, parseInt(next, 10) || 1)); }
+        function syncCountButtons(){
+            const wrap = document.getElementById('countSelect');
+            if(!wrap) return;
+            wrap.querySelectorAll('[data-count]').forEach(btn => {
+                const active = Number(btn.dataset.count) === outputCount;
+                btn.classList.toggle('active', active);
+                btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+        }
+        function setCount(next){
+            outputCount = Math.max(1, Math.min(4, parseInt(next, 10) || 1));
+            syncCountButtons();
+        }
 
         async function initModels(){
             try {
@@ -424,8 +656,6 @@
             } catch(e) {}
             renderProviderControls();
         }
-        // API 设置页保存后会广播 studio-api 事件；这里重新拉取 /api/config，
-        // 尽量保留当前已选的平台/模型，renderProviderControls 会在其不存在时自动回退。
         async function refreshProvidersFromApiSettings(){
             try {
                 const cfg = await fetch('/api/config').then(r=>r.json());
@@ -445,16 +675,18 @@
             const studioApiChannel = new BroadcastChannel('studio-api');
             studioApiChannel.addEventListener('message', () => scheduleProviderRefresh());
         } catch(e) {}
-        // 页面重新可见时也兜底刷新一次（切回标签页 / iframe 重新展示）
         document.addEventListener('visibilitychange', () => { if(!document.hidden) scheduleProviderRefresh(); });
 
         function setProvider(next){
             provider = next;
-            selectedModel = providerModels(provider)[0] || selectedModel;
+            selectedModel = isRunningHubProvider(provider)
+                ? (runningHubEntries(provider).map(e => e.kind === 'model' ? e.id : `${e.kind}:${e.id}`)[0] || '')
+                : (providerModels(provider)[0] || selectedModel);
             renderProviderControls();
         }
         function setModel(next){
             selectedModel = next;
+            updateAdaptivePanel();
         }
         function escapeHtml(str){ return String(str || '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
 
@@ -481,7 +713,7 @@
             });
         }
         function firstReferenceDimension(){
-            return [1,2,3].map(id => refDims[id]).find(dim => dim?.width && dim?.height) || null;
+            return refItems.map(it => it?.dim).find(dim => dim?.width && dim?.height) || null;
         }
 
         function setRatio(next, preferredSize = ''){
@@ -524,43 +756,35 @@
             updateSizeUI();
         }
 
-        function updateSizeUI(){
-            const ratioSelect = document.getElementById('ratioSelect');
-            const ratioField = document.getElementById('ratioField');
-            const ratioCustomWidthInput = document.getElementById('ratioCustomWidth');
-            const ratioCustomHeightInput = document.getElementById('ratioCustomHeight');
-            const resolutionSelect = document.getElementById('resolutionSelect');
-            const resolutionField = document.getElementById('resolutionField');
-            const sizeCustomWidthInput = document.getElementById('sizeCustomWidth');
-            const sizeCustomHeightInput = document.getElementById('sizeCustomHeight');
-            const fitImageSizeBtn = document.getElementById('fitImageSizeBtn');
-            ratioSelect.value = ratio;
-            ratioSelect.disabled = resolution === 'custom';
-            ratioField.classList.toggle('custom', ratio === 'custom');
-            ratioCustomWidthInput.value = customRatioWidth;
-            ratioCustomHeightInput.value = customRatioHeight;
-            resolutionSelect.value = resolution;
-            resolutionField.classList.toggle('custom', resolution === 'custom');
-            sizeCustomWidthInput.value = customWidth;
-            sizeCustomHeightInput.value = customHeight;
-            if(fitImageSizeBtn) fitImageSizeBtn.disabled = !firstReferenceDimension();
-            updateResolutionUI();
-        }
-
-        function updateResolutionUI(){}
-        function fitCustomSizeToImage(event){
-            if(event) event.preventDefault();
-            const dim = firstReferenceDimension();
-            if(!dim) return;
-            resolution = 'custom';
-            ratio = '';
-            customWidth = dim.width;
-            customHeight = dim.height;
-            updateSizeUI();
+        function currentAspectRatioString(){
+            if(resolution === 'custom' || resolution === 'auto') return '';
+            if(ratio === 'custom'){
+                const w = Math.round(Number(customRatioWidth) || 0);
+                const h = Math.round(Number(customRatioHeight) || 0);
+                return (w > 0 && h > 0) ? `${w}:${h}` : '1:1';
+            }
+            return RATIO_CODE_MAP[ratio] || '1:1';
         }
 
         function currentSize(){
-            if(resolution === 'custom') return customSizeValue();
+            const profile = currentModelProfile();
+            if(resolution === 'auto') return 'auto';
+            if(resolution === '256') return '256x256';
+            if(resolution === '512') return '512x512';
+            if(resolution === 'custom') return customSizeValue() || '1024x1024';
+            if(profile.isDalle3){
+                if(ratio === 'wide') return '1792x1024';
+                if(ratio === 'story') return '1024x1792';
+                return '1024x1024';
+            }
+            if(profile.isGpt1){
+                if(ratio === 'landscape') return '1536x1024';
+                if(ratio === 'portrait') return '1024x1536';
+                return '1024x1024';
+            }
+            if(ratio === 'square' && resolution === '4k' && !profile.isGpt2){
+                return '4096x4096';
+            }
             const options = SIZE_OPTIONS[ratio] || SIZE_OPTIONS.square;
             if(ratio === 'custom'){
                 const parsed = customRatioValue();
@@ -578,62 +802,307 @@
             return match[0];
         }
 
-        [1,2,3].forEach(id => {
-            const zone = document.getElementById(`drop-zone-${id}`);
-            zone.ondragover = e => { e.preventDefault(); zone.classList.add('drag-over'); };
-            zone.ondragleave = () => zone.classList.remove('drag-over');
-            zone.ondrop = e => { e.preventDefault(); zone.classList.remove('drag-over'); handleFile(e.dataTransfer.files[0], id); };
-        });
-        window.addEventListener('paste', e => {
-            const item = [...(e.clipboardData?.items || [])].find(x => x.kind === 'file' && x.type.startsWith('image/'));
-            if (item) handleFile(item.getAsFile(), firstEmptySlot());
-        });
-        function firstEmptySlot(){ return [1,2,3].find(id => !refs[id]) || 1; }
+        function updateSizeUI(){
+            const profile = currentModelProfile();
+            const ratioSelect = document.getElementById('ratioSelect');
+            const ratioField = document.getElementById('ratioField');
+            const ratioCustomWidthInput = document.getElementById('ratioCustomWidth');
+            const ratioCustomHeightInput = document.getElementById('ratioCustomHeight');
+            const resolutionSelect = document.getElementById('resolutionSelect');
+            const resolutionField = document.getElementById('resolutionField');
+            const sizeCustomWidthInput = document.getElementById('sizeCustomWidth');
+            const sizeCustomHeightInput = document.getElementById('sizeCustomHeight');
+            const fitImageSizeBtn = document.getElementById('fitImageSizeBtn');
+            const resolvedBadge = document.getElementById('resolvedSizeBadge');
+            if(ratioSelect) {
+                ratioSelect.value = ratio;
+                ratioSelect.disabled = (resolution === 'custom' || resolution === 'auto' || (profile.isSoonStudio && profile.isSeedream));
+            }
+            if(ratioField) ratioField.classList.toggle('custom', ratio === 'custom');
+            if(ratioCustomWidthInput) ratioCustomWidthInput.value = customRatioWidth;
+            if(ratioCustomHeightInput) ratioCustomHeightInput.value = customRatioHeight;
+            if(resolutionSelect) resolutionSelect.value = resolution;
+            if(resolutionField) resolutionField.classList.toggle('custom', resolution === 'custom');
+            if(sizeCustomWidthInput) sizeCustomWidthInput.value = customWidth;
+            if(sizeCustomHeightInput) sizeCustomHeightInput.value = customHeight;
+            if(fitImageSizeBtn) fitImageSizeBtn.disabled = !firstReferenceDimension();
+            if(resolvedBadge){
+                if(profile.isSoonStudio && profile.isSeedream){
+                    resolvedBadge.textContent = `${resolution.toUpperCase()}`;
+                } else {
+                    const sz = currentSize();
+                    const ar = currentAspectRatioString();
+                    resolvedBadge.textContent = sz === 'auto' ? 'Auto' : (ar ? `${ar} · ${sz}` : sz);
+                }
+            }
+        }
 
-        async function handleFile(file, index){
-            if(!file) return;
-            const reader = new FileReader();
-            reader.onload = e => {
-                const prev = document.getElementById(`prev${index}`);
-                prev.src = e.target.result; prev.classList.remove('hidden');
-                document.getElementById(`del${index}`).classList.remove('hidden');
-                getImageDimensions(e.target.result).then(dim => {
-                    refDims[index] = dim;
-                    updateSizeUI();
-                }).catch(() => {});
-            };
-            reader.readAsDataURL(file);
+        function fitCustomSizeToImage(event){
+            if(event) event.preventDefault();
+            const dim = firstReferenceDimension();
+            if(!dim) return;
+            const profile = currentModelProfile();
+            if(!profile.resolutions.includes('custom')) return;
+            resolution = 'custom';
+            ratio = '';
+            customWidth = dim.width;
+            customHeight = dim.height;
+            updateSizeUI();
+        }
+
+        function renderRefGrid(){
+            const profile = currentModelProfile();
+            const grid = document.getElementById('refGrid');
+            const notice = document.getElementById('refDisabledNotice');
+            const badge = document.getElementById('refFormatBadge');
+            if(!grid || !notice) return;
+            if(profile.maxRefs === 0){
+                grid.classList.add('hidden');
+                notice.classList.remove('hidden');
+                notice.textContent = uiText('当前所选模型仅支持纯文生图，无需上传参考图（已上传图片不会随本次请求发送）。', 'Selected model is text-to-image only; reference images will be ignored.');
+                if(badge) badge.textContent = uiText('纯文生图', 'T2I Only');
+                return;
+            }
+            notice.classList.add('hidden');
+            grid.classList.remove('hidden');
+            const activeCount = Math.min(refItems.length, profile.maxRefs);
+            if(badge){
+                badge.textContent = `${activeCount}/${profile.maxRefs} · PNG/JPG/WEBP/GIF`;
+            }
+            const visibleSlots = profile.maxRefs === 1 ? 1 : Math.min(profile.maxRefs, Math.max(3, refItems.length + 1));
+            const htmlParts = [];
+            for(let idx = 0; idx < visibleSlots; idx++){
+                const item = refItems[idx];
+                if(item){
+                    const tagLabel = item.isTranscoded
+                        ? uiText(`图${idx + 1} · 自动转码`, `#${idx + 1} · Auto`)
+                        : uiText(`图${idx + 1}`, `#${idx + 1}`);
+                    const src = item.previewUrl || item.url || '';
+                    htmlParts.push(`
+                        <div class="upload-item group aspect-square rounded-2xl flex flex-col items-center justify-center cursor-pointer" data-slot="${idx}" onclick="triggerReplaceSlot(${idx})">
+                            <span class="ref-slot-badge">${escapeHtml(tagLabel)}</span>
+                            <img src="${escapeHtml(src)}" class="preview-img" alt="ref">
+                            <button type="button" onclick="removeRefAt(${idx}, event)" class="absolute top-1.5 right-1.5 w-6 h-6 bg-black/70 text-white rounded-full shadow-sm z-10 text-xs flex items-center justify-center hover:bg-black">×</button>
+                        </div>
+                    `);
+                } else {
+                    const slotName = idx === 0 ? uiText('主参考图', 'Main') : uiText(`参考图 ${idx + 1}`, `Ref ${idx + 1}`);
+                    htmlParts.push(`
+                        <div class="upload-item group aspect-square rounded-2xl flex flex-col items-center justify-center cursor-pointer" data-slot="${idx}" onclick="openMultiRefPicker(${idx})">
+                            <i data-lucide="plus" class="w-5 h-5 text-gray-300 group-hover:text-black"></i>
+                            <span class="text-[9px] mt-1.5 font-bold text-gray-400 uppercase">${escapeHtml(slotName)}</span>
+                        </div>
+                    `);
+                }
+            }
+            grid.innerHTML = htmlParts.join('');
+            grid.querySelectorAll('.upload-item').forEach(zone => {
+                const slotIdx = Number(zone.dataset.slot || 0);
+                zone.ondragover = e => { e.preventDefault(); zone.classList.add('drag-over'); };
+                zone.ondragleave = () => zone.classList.remove('drag-over');
+                zone.ondrop = e => {
+                    e.preventDefault();
+                    zone.classList.remove('drag-over');
+                    const files = [...(e.dataTransfer?.files || [])].filter(f => f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif|tiff?)$/i.test(f.name || ''));
+                    if(files.length === 1 && refItems[slotIdx]) replaceSlotWithFile(files[0], slotIdx);
+                    else handleBatchFiles(files);
+                };
+            });
+            lucide.createIcons();
+        }
+
+        let pendingReplaceIdx = -1;
+        function openMultiRefPicker(){
+            pendingReplaceIdx = -1;
+            const inp = document.getElementById('multiRefInput');
+            if(inp){ inp.multiple = currentModelProfile().maxRefs > 1; inp.click(); }
+        }
+        function triggerReplaceSlot(idx){
+            pendingReplaceIdx = idx;
+            const inp = document.getElementById('multiRefInput');
+            if(inp){ inp.multiple = false; inp.click(); }
+        }
+        function removeRefAt(idx, ev){
+            if(ev) ev.stopPropagation();
+            refItems.splice(idx, 1);
+            renderRefGrid();
+            updateSizeUI();
+        }
+
+        async function uploadSingleRefFile(file){
+            const isTranscoded = /\.(gif|bmp|avif|tiff?|heic|heif)$/i.test(file.name || '') || /image\/(gif|bmp|avif|tiff|heic|heif)/i.test(file.type || '');
+            const previewUrl = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(String(e.target?.result || ''));
+                reader.onerror = () => resolve('');
+                reader.readAsDataURL(file);
+            });
+            let dim = null;
+            if(previewUrl){
+                try { dim = await getImageDimensions(previewUrl); } catch(e) {}
+            }
             const form = new FormData();
             form.append('files', file);
-            const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(r=>r.json());
-            refs[index] = data.files[0];
+            const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async r => {
+                if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || '上传参考图失败');
+                return r.json();
+            });
+            const uploaded = data.files?.[0];
+            if(!uploaded?.url) throw new Error('上传未返回文件地址');
+            return { ...uploaded, previewUrl: previewUrl || uploaded.url, dim, isTranscoded };
         }
-        function clearSlot(index, ev){
-            if(ev) ev.stopPropagation();
-            refs[index] = null;
-            refDims[index] = null;
-            document.getElementById(`prev${index}`).src = '';
-            document.getElementById(`prev${index}`).classList.add('hidden');
-            document.getElementById(`del${index}`).classList.add('hidden');
+
+        async function replaceSlotWithFile(file, idx){
+            if(!file) return;
+            try {
+                const item = await uploadSingleRefFile(file);
+                refItems[idx] = item;
+                renderRefGrid();
+                updateSizeUI();
+            } catch(err) {
+                alert(err.message || '上传失败');
+            }
+        }
+
+        async function handleBatchFiles(fileList){
+            const files = [...(fileList || [])].filter(Boolean);
+            if(!files.length) return;
+            const profile = currentModelProfile();
+            if(profile.maxRefs === 0) return;
+            if(pendingReplaceIdx >= 0 && files[0]){
+                const targetIdx = pendingReplaceIdx;
+                pendingReplaceIdx = -1;
+                await replaceSlotWithFile(files[0], targetIdx);
+                return;
+            }
+            const remain = Math.max(0, profile.maxRefs - refItems.length);
+            const slice = files.slice(0, remain || (profile.maxRefs === 1 ? 1 : 0));
+            if(!slice.length && profile.maxRefs === 1){
+                await replaceSlotWithFile(files[0], 0);
+                return;
+            }
+            for(const file of slice){
+                try {
+                    const item = await uploadSingleRefFile(file);
+                    refItems.push(item);
+                } catch(err) {
+                    alert(err.message || '上传失败');
+                    break;
+                }
+            }
+            renderRefGrid();
+            updateSizeUI();
+        }
+
+        window.addEventListener('paste', e => {
+            if(document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) && e.clipboardData?.getData('text/plain')) return;
+            const files = [...(e.clipboardData?.items || [])]
+                .filter(x => x.kind === 'file' && x.type.startsWith('image/'))
+                .map(x => x.getAsFile())
+                .filter(Boolean);
+            if(files.length) handleBatchFiles(files);
+        });
+
+        function renderResultDisplay(result, activeIdx = 0){
+            if(!result?.images?.length) return;
+            currentResult = result;
+            currentResultIdx = Math.max(0, Math.min(result.images.length - 1, activeIdx));
+            const out = document.getElementById('outputImg');
+            const dl = document.getElementById('downloadBtn');
+            const strip = document.getElementById('resultThumbStrip');
+            const currentUrl = result.images[currentResultIdx];
+            out.src = currentUrl;
+            out.classList.remove('hidden');
+            dl.href = currentUrl;
+            dl.classList.remove('hidden');
+            if(strip){
+                if(result.images.length > 1){
+                    strip.classList.remove('hidden');
+                    strip.innerHTML = result.images.map((u, idx) => `
+                        <button type="button" class="result-thumb-btn ${idx === currentResultIdx ? 'active' : ''}" onclick="event.stopPropagation();renderResultDisplay(currentResult, ${idx})">
+                            <img src="${escapeHtml(u)}" alt="result ${idx + 1}">
+                        </button>
+                    `).join('');
+                } else {
+                    strip.classList.add('hidden');
+                    strip.innerHTML = '';
+                }
+            }
+        }
+
+        async function pollOnlineImageTask(taskId, statusEl){
+            const startedAt = Date.now();
+            while(Date.now() - startedAt < 30 * 60 * 1000){
+                await new Promise(r => setTimeout(r, 1500));
+                const elapsed = Math.round((Date.now() - startedAt) / 1000);
+                if(statusEl) statusEl.textContent = uiText(`云端正在渲染 (${elapsed}s)...`, `Rendering (${elapsed}s)...`);
+                const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {cache:'no-store'}).then(async r => {
+                    if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || '查询任务失败');
+                    return r.json();
+                });
+                if(task.status === 'succeeded' && task.result){
+                    return task.result;
+                }
+                if(task.status === 'failed'){
+                    throw new Error(task.error || '生成失败');
+                }
+                if(task.status === 'jimeng_pending' && statusEl){
+                    statusEl.textContent = task.message || uiText(`排队生成中 (${elapsed}s)...`, `Queued (${elapsed}s)...`);
+                }
+            }
+            throw new Error(uiText('生图任务等待超时，请稍后在历史记录查看。', 'Generation timed out.'));
         }
 
         async function submitImage(){
             const prompt = document.getElementById('promptInput').value.trim();
             if(!prompt){ alert(tr('online.promptRequired')); return; }
-            const btn = document.getElementById('genBtn'), loader = document.getElementById('loader'), placeholder = document.getElementById('placeholder'), out = document.getElementById('outputImg'), dl = document.getElementById('downloadBtn');
-            btn.disabled = true; placeholder.classList.add('hidden'); out.classList.add('hidden'); dl.classList.add('hidden'); loader.classList.remove('hidden');
+            const profile = currentModelProfile();
+            const btn = document.getElementById('genBtn'), loader = document.getElementById('loader'), statusEl = document.getElementById('loaderStatus'), placeholder = document.getElementById('placeholder'), out = document.getElementById('outputImg'), dl = document.getElementById('downloadBtn'), strip = document.getElementById('resultThumbStrip');
+            btn.disabled = true; placeholder.classList.add('hidden'); out.classList.add('hidden'); dl.classList.add('hidden'); if(strip) strip.classList.add('hidden'); loader.classList.remove('hidden');
+            if(statusEl) statusEl.textContent = uiText('正在提交请求...', 'Submitting...');
             try {
-                const reqBody = { prompt, provider_id:provider, model:selectedModel, size:currentSize(), n:outputCount, reference_images:Object.values(refs).filter(Boolean) };
-                if(QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
-                const result = await fetch('/api/online-image', {
+                const activeRefs = profile.maxRefs > 0
+                    ? refItems.slice(0, profile.maxRefs).map(it => ({ url: it.url, name: it.name || '', kind: 'image', mime: it.mime || '' }))
+                    : [];
+                const reqBody = {
+                    prompt,
+                    provider_id: provider,
+                    model: selectedModel,
+                    size: currentSize(),
+                    aspect_ratio: currentAspectRatioString(),
+                    resolution: ['auto', 'custom', '256', '512'].includes(resolution) ? '' : resolution,
+                    n: outputCount,
+                    reference_images: activeRefs,
+                };
+                if(profile.qualityMode !== 'none') reqBody.quality = quality;
+
+                let result = null;
+                const taskResp = await fetch('/api/canvas-image-tasks', {
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body:JSON.stringify(reqBody)
-                }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || '生成失败'); return r.json(); });
-                currentResult = result; out.src = result.images[0]; out.classList.remove('hidden'); dl.href = result.images[0]; dl.classList.remove('hidden'); renderImageCard(result, true);
+                });
+                if(taskResp.ok){
+                    const taskMeta = await taskResp.json();
+                    if(taskMeta?.task_id){
+                        result = await pollOnlineImageTask(taskMeta.task_id, statusEl);
+                    }
+                }
+                if(!result){
+                    result = await fetch('/api/online-image', {
+                        method:'POST', headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify(reqBody)
+                    }).then(async r => { if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || '生成失败'); return r.json(); });
+                }
+                renderResultDisplay(result, 0);
+                renderImageCard(result, true);
             } catch(err) {
-                alert(err.message || 'Generation failed'); placeholder.classList.remove('hidden');
+                alert(err.message || 'Generation failed');
+                if(currentResult?.images?.length) renderResultDisplay(currentResult, currentResultIdx);
+                else placeholder.classList.remove('hidden');
             } finally {
-                loader.classList.add('hidden'); btn.disabled = false;
+                if(statusEl) statusEl.textContent = '';
+                loader.classList.add('hidden');
+                btn.disabled = false;
             }
         }
 
@@ -643,11 +1112,11 @@
             card.id = `history-${data.timestamp}`;
             card.dataset.historyTs = data.timestamp;
             card.className = 'masonry-item group relative cursor-zoom-in';
-            card.onclick = () => { if(document.body.classList.contains('history-bulk-selecting')) return; openLightbox(data); };
+            card.onclick = () => { if(document.body.classList.contains('history-bulk-selecting')) return; openLightbox(data, 0); };
             const multi = Array.isArray(data.images) && data.images.length > 1
                 ? `<div class="absolute top-3 right-3 bg-black/60 text-white text-[10px] font-black px-2 py-0.5 rounded-full pointer-events-none">×${data.images.length}</div>` : '';
-            card.innerHTML = `<img src="${data.images[0]}" class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-1000" loading="lazy">${multi}
-                <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 p-6 flex flex-col justify-end"><p class="text-white text-[10px] font-medium line-clamp-2 uppercase tracking-wider">${data.prompt || tr('online.onlineImageFallback')}</p></div>`;
+            card.innerHTML = `<img src="${escapeHtml(data.images[0])}" class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-1000" loading="lazy">${multi}
+                <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 p-6 flex flex-col justify-end"><p class="text-white text-[10px] font-medium line-clamp-2 uppercase tracking-wider">${escapeHtml(data.prompt || tr('online.onlineImageFallback'))}</p></div>`;
             isNew ? document.getElementById('masonry').prepend(card) : document.getElementById('masonry').appendChild(card);
             lucide.createIcons();
         }
@@ -667,15 +1136,34 @@
             }
             return lightboxPreview;
         }
-        function openLightbox(data){
-            currentLightboxData = data;
+        function setLightboxImageIndex(idx){
+            if(!currentLightboxData?.images?.length) return;
+            currentLightboxIdx = Math.max(0, Math.min(currentLightboxData.images.length - 1, idx));
             const img = document.getElementById('lightboxImg');
             const res = document.getElementById('lightboxRes');
+            const strip = document.getElementById('lightboxThumbStrip');
             res.textContent = '...';
-            ensureLightboxPreview();
             if(lightboxPreview) lightboxPreview.reset();
-            img.onload = () => { res.textContent = img.naturalWidth && img.naturalHeight ? `${img.naturalWidth} x ${img.naturalHeight}` : (data.params?.size || '--'); };
-            img.src = data.images[0];
+            img.onload = () => { res.textContent = img.naturalWidth && img.naturalHeight ? `${img.naturalWidth} x ${img.naturalHeight}` : (currentLightboxData.params?.size || '--'); };
+            img.src = currentLightboxData.images[currentLightboxIdx];
+            if(strip){
+                if(currentLightboxData.images.length > 1){
+                    strip.classList.remove('hidden');
+                    strip.innerHTML = currentLightboxData.images.map((u, i) => `
+                        <button type="button" class="result-thumb-btn ${i === currentLightboxIdx ? 'active' : ''}" onclick="event.stopPropagation();setLightboxImageIndex(${i})">
+                            <img src="${escapeHtml(u)}" alt="preview ${i + 1}">
+                        </button>
+                    `).join('');
+                } else {
+                    strip.classList.add('hidden');
+                    strip.innerHTML = '';
+                }
+            }
+        }
+        function openLightbox(data, startIdx = 0){
+            currentLightboxData = data;
+            ensureLightboxPreview();
+            setLightboxImageIndex(startIdx);
             document.getElementById('lightboxPrompt').textContent = data.prompt || '';
             document.getElementById('lightbox').classList.replace('hidden','flex');
             document.body.style.overflow='hidden';
@@ -689,7 +1177,7 @@
         function handleOutsideClick(e){ if(e.target.id === 'lightbox') closeLightbox(); }
         async function downloadLightboxImage(e){
             e.stopPropagation();
-            const url = currentLightboxData?.images?.[0];
+            const url = currentLightboxData?.images?.[currentLightboxIdx] || currentLightboxData?.images?.[0];
             if(!url) return;
             const res = await fetch(url);
             if(!res.ok) return alert('下载失败');
@@ -704,31 +1192,42 @@
             link.remove();
             setTimeout(() => URL.revokeObjectURL(link.href), 1000);
         }
-        function zoomImage(){ if(currentResult) openLightbox(currentResult); }
+        function zoomImage(){ if(currentResult) openLightbox(currentResult, currentResultIdx); }
         function applySameStyle(){
             if(!currentLightboxData) return;
             document.getElementById('promptInput').value = currentLightboxData.prompt || '';
-            [1,2,3].forEach(id => clearSlot(id));
-            (currentLightboxData.params?.reference_images || []).slice(0,3).forEach((ref,i) => {
-                refs[i+1] = ref; const prev = document.getElementById(`prev${i+1}`);
-                prev.src = ref.url; prev.classList.remove('hidden'); document.getElementById(`del${i+1}`).classList.remove('hidden');
-                getImageDimensions(ref.url).then(dim => {
-                    refDims[i+1] = dim;
-                    updateSizeUI();
-                }).catch(() => {});
+            if(currentLightboxData.provider_id && imageProviders().some(p => p.id === currentLightboxData.provider_id)){
+                provider = currentLightboxData.provider_id;
+            }
+            if(currentLightboxData.model){
+                selectedModel = currentLightboxData.model;
+            }
+            renderProviderControls();
+            refItems = [];
+            const savedRefs = (currentLightboxData.params?.reference_images || []).slice(0, MAX_REFERENCE_SLOTS);
+            savedRefs.forEach(ref => {
+                if(!ref?.url) return;
+                const entry = { ...ref, previewUrl: ref.url, dim: null, isTranscoded: /\.(gif|bmp|avif|tiff?)$/i.test(ref.url) };
+                refItems.push(entry);
+                getImageDimensions(ref.url).then(dim => { entry.dim = dim; updateSizeUI(); }).catch(() => {});
             });
-            const size = currentLightboxData.params?.size || '1024x1024';
-            const matchedRatio = Object.keys(SIZE_OPTIONS).find(key => SIZE_OPTIONS[key].some(([value]) => value === size)) || 'square';
-            const matchedRes = SIZE_OPTIONS[matchedRatio]?.find(([value]) => value === size)?.[1];
-            if(matchedRes) {
-                setRatio(matchedRatio, size);
-                setResolution(matchedRes);
+            renderRefGrid();
+            const size = currentLightboxData.params?.requested_size || currentLightboxData.params?.size || '1024x1024';
+            if(String(size).toLowerCase() === 'auto' && currentModelProfile().resolutions.includes('auto')){
+                setResolution('auto');
             } else {
-                setResolution('custom');
-                const parsed = parseSizeValue(size);
-                customWidth = parsed?.width || '';
-                customHeight = parsed?.height || '';
-                updateSizeUI();
+                const matchedRatio = Object.keys(SIZE_OPTIONS).find(key => SIZE_OPTIONS[key].some(([value]) => value === size)) || 'square';
+                const matchedRes = SIZE_OPTIONS[matchedRatio]?.find(([value]) => value === size)?.[1];
+                if(matchedRes && currentModelProfile().resolutions.includes(matchedRes)) {
+                    setRatio(matchedRatio, size);
+                    setResolution(matchedRes);
+                } else if(currentModelProfile().resolutions.includes('custom')) {
+                    setResolution('custom');
+                    const parsed = parseSizeValue(size);
+                    customWidth = parsed?.width || '';
+                    customHeight = parsed?.height || '';
+                    updateSizeUI();
+                }
             }
             closeLightbox(); window.scrollTo({top:0, behavior:'smooth'});
         }
