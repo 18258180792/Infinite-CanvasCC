@@ -16,14 +16,14 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.22.1.1794902612"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.11.22.1.1794902611"></script>
-    <script src="/static/js/theme.js?v=2026.11.22.1.1795234217"></script>
-    <script src="/static/js/i18n.js?v=2026.11.22.1.1794902556"></script>
-    <script src="/static/js/image-preview.js?v=2026.11.22.1.1794902564"></script>
-    <script src="/static/js/history-bulk-manager.js?v=2026.11.22.1.1794902553"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.11.23.1.1794902612"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.11.23.1.1794902611"></script>
+    <script src="/static/js/theme.js?v=2026.11.23.1.1795234217"></script>
+    <script src="/static/js/i18n.js?v=2026.11.23.1.1794902556"></script>
+    <script src="/static/js/image-preview.js?v=2026.11.23.1.1794902564"></script>
+    <script src="/static/js/history-bulk-manager.js?v=2026.11.23.1.1794902553"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.11.22.1.1794902588');
+        @import url('/static/vendor/css/fonts.css?v=2026.11.23.1.1794902588');
         :root { --accent:#111827; --bg:#f9fafb; --card:#fff; --easing:cubic-bezier(0.4,0,0.2,1); }
         body { background:var(--bg); font-family:'Inter',-apple-system,sans-serif; color:var(--accent); -webkit-font-smoothing:antialiased; }
         .container-box { max-width:1280px; margin:0 auto; padding:0 40px; margin-top:50px; }
@@ -81,7 +81,7 @@
         .gallery-lightbox { background:rgba(255,255,255,.99); backdrop-filter:blur(22px) saturate(1.05); }
         @keyframes fadeIn { from{opacity:0} to{opacity:1} }
     </style>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.22.1.1795232862">
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.11.23.1.1795232862">
     <style>
         html:not(.studio-theme-dark) body:not(.studio-theme-dark) #lightbox.gallery-lightbox {
             background: rgba(255,255,255,.99) !important;
@@ -89,7 +89,7 @@
             -webkit-backdrop-filter: blur(22px) saturate(1.05) !important;
         }
     </style>
-    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.22.1.1795276495">
+    <link rel="stylesheet" href="/static/css/studio-unified.css?v=2026.11.23.1.1795276495">
 </head>
 <body>
     <div class="container-box min-h-screen flex flex-col">
@@ -1032,14 +1032,41 @@
 
         async function pollOnlineImageTask(taskId, statusEl){
             const startedAt = Date.now();
+            let consecutiveErrors = 0;
+            let knownUpstreamId = '';
+            const shortId = value => {
+                const text = String(value || '').trim();
+                if(text.length <= 14) return text;
+                return `${text.slice(0, 8)}…${text.slice(-4)}`;
+            };
             while(Date.now() - startedAt < 30 * 60 * 1000){
                 await new Promise(r => setTimeout(r, 1500));
                 const elapsed = Math.round((Date.now() - startedAt) / 1000);
-                if(statusEl) statusEl.textContent = uiText(`云端正在渲染 (${elapsed}s)...`, `Rendering (${elapsed}s)...`);
-                const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {cache:'no-store'}).then(async r => {
-                    if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || '查询任务失败');
-                    return r.json();
-                });
+                if(statusEl){
+                    statusEl.textContent = knownUpstreamId
+                        ? uiText(`已受理 (ID: ${shortId(knownUpstreamId)})，云端正在渲染 (${elapsed}s)...`, `Accepted (${shortId(knownUpstreamId)}), rendering (${elapsed}s)...`)
+                        : uiText(`云端正在渲染 (${elapsed}s)...`, `Rendering (${elapsed}s)...`);
+                }
+                let resStatus = 0;
+                let task;
+                try {
+                    const r = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {cache:'no-store'});
+                    resStatus = r.status;
+                    if(!r.ok){
+                        const errBody = await r.json().catch(()=>({}));
+                        throw new Error(errBody.detail || '查询任务失败');
+                    }
+                    task = await r.json();
+                    consecutiveErrors = 0;
+                } catch(err) {
+                    if(resStatus === 404) throw err;
+                    consecutiveErrors += 1;
+                    if(consecutiveErrors <= 4) continue;
+                    throw err;
+                }
+                if(task.upstream_task_id){
+                    knownUpstreamId = String(task.upstream_task_id).trim();
+                }
                 if(task.status === 'succeeded' && task.result){
                     return task.result;
                 }
@@ -1048,6 +1075,8 @@
                 }
                 if(task.status === 'jimeng_pending' && statusEl){
                     statusEl.textContent = task.message || uiText(`排队生成中 (${elapsed}s)...`, `Queued (${elapsed}s)...`);
+                } else if(knownUpstreamId && statusEl){
+                    statusEl.textContent = uiText(`已受理 (ID: ${shortId(knownUpstreamId)})，云端正在渲染 (${elapsed}s)...`, `Accepted (${shortId(knownUpstreamId)}), rendering (${elapsed}s)...`);
                 }
             }
             throw new Error(uiText('生图任务等待超时，请稍后在历史记录查看。', 'Generation timed out.'));

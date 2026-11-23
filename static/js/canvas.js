@@ -6138,24 +6138,42 @@ function pendingOutputStyle(pending){
     if(!size) return '';
     return ` style="aspect-ratio:${Math.max(1, size.w)}/${Math.max(1, size.h)}"`;
 }
+function shortUpstreamTaskId(id){
+    const value = String(id || '').trim();
+    if(!value) return '';
+    if(value.length <= 14) return value;
+    return `${value.slice(0, 8)}…${value.slice(-4)}`;
+}
 function renderPendingOutput(pending){
     if(pending?.failed){
         const taskId = pending.recoverTaskId || '';
         const querying = Boolean(pending.querying);
         const msg = pending.error || tr('canvas.generationFailed');
-        const sub = taskId ? `任务 ID：${escapeHtml(taskId)}` : '没有任务 ID，无法查询';
+        const subHtml = taskId
+            ? `<button type="button" class="output-recover-sub output-recover-copy" data-copy-task-id="${escapeAttr(taskId)}" title="${escapeAttr(`点击复制完整任务 ID：${taskId}`)}">${escapeHtml(`任务 ID：${taskId}`)}</button>`
+            : '<div class="output-recover-sub">没有任务 ID，无法查询</div>';
         return `<div class="output-img-wrap loading-wrap recoverable" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}>
             <span class="output-time-pill failed">失败</span>
             <div class="output-recover-state">
                 <i data-lucide="refresh-cw" class="${querying ? 'spinning' : ''}"></i>
                 <div class="output-recover-title">${querying ? '查询中' : '任务未丢失'}</div>
-                <div class="output-recover-sub" title="${escapeAttr(msg)}">${sub}</div>
+                ${subHtml}
                 <button class="output-recover-query" type="button" ${taskId && !querying ? '' : 'disabled'}>${querying ? '查询中...' : '查询结果'}</button>
             </div>
             <button class="output-del" title="${tr('common.delete')}">×</button>
         </div>`;
     }
-    return `<div class="output-img-wrap loading-wrap" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}><span class="output-time-pill running">${formatRunDuration(nowMs() - Number(pending.startedAt || nowMs()))}</span><div class="output-spinner"></div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+    let stageHtml = '<span class="output-task-stage-pill">提交中…</span>';
+    if(pending?.recoverTaskId){
+        const fullId = escapeAttr(pending.recoverTaskId);
+        const shortId = escapeHtml(shortUpstreamTaskId(pending.recoverTaskId));
+        stageHtml = `<button type="button" class="output-task-stage-pill accepted" data-copy-task-id="${fullId}" title="${escapeAttr(`点击复制完整任务 ID：${pending.recoverTaskId}`)}">已受理 · ${shortId}</button>`;
+    } else if(pending?.stage === 'downloading'){
+        stageHtml = '<span class="output-task-stage-pill">下载中…</span>';
+    } else if(pending?.stage === 'polling'){
+        stageHtml = '<span class="output-task-stage-pill">生成中…</span>';
+    }
+    return `<div class="output-img-wrap loading-wrap" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}><span class="output-time-pill running">${formatRunDuration(nowMs() - Number(pending.startedAt || nowMs()))}</span><div class="output-spinner"></div>${stageHtml}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
 }
 function captureOutputScrolls(){
     const state = new Map();
@@ -6528,6 +6546,21 @@ function bindOutputWrap(wrap, node){
             if(pid) queryRecoverPendingOutput(pid);
         };
     }
+    wrap.querySelectorAll('[data-copy-task-id]').forEach(copyBtn => {
+        copyBtn.onmousedown = e => {
+            e.preventDefault();
+            e.stopPropagation();
+        };
+        copyBtn.onclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const tid = String(copyBtn.dataset.copyTaskId || '').trim();
+            if(!tid) return;
+            copyTextToClipboard(tid).then(ok => {
+                setStatus(ok ? `已复制任务 ID：${tid}` : `任务 ID：${tid}`);
+            }).catch(() => setStatus(`任务 ID：${tid}`));
+        };
+    });
 }
 function outputDomKeyForItem(item){
     return `url:${outputUrlValue(item)}`;
@@ -13725,7 +13758,13 @@ async function queryRecoverPendingOutput(pendingId){
         const res = await fetch('/api/image-task-query', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({provider_id:providerIdForPending(pending), task_id:taskId, model:pending.model || pending.run?.request?.model || ''})
+            body:JSON.stringify({
+                provider_id:providerIdForPending(pending),
+                task_id:taskId,
+                model:pending.model || pending.run?.request?.model || '',
+                prompt:pending.run?.prompt || pending.run?.request?.prompt || '',
+                canvas_id:canvas?.id || ''
+            })
         });
         if(!res.ok) throw new Error(await responseErrorMessage(res, '查询失败'));
         const data = await res.json();
@@ -13758,17 +13797,53 @@ async function pollCanvasImageTask(taskId, options={}){
     if(activeCanvasTaskPolls.has(taskId)) return 'running';
     activeCanvasTaskPolls.add(taskId);
     try {
+        let consecutiveErrors = 0;
         while(true){
             const found = findPendingTask(taskId);
             if(!found) return 'missing';
             const cascadeTargetId = String(options?.cascadeTargetId || found?.pending?.cascadeTargetId || '');
             if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
-            const res = await cascadeFetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
-            if(!res.ok){
-                if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
-                throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
+            let res;
+            let data;
+            try {
+                res = await cascadeFetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
+                if(!res.ok){
+                    if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
+                    throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
+                }
+                data = await res.json();
+                consecutiveErrors = 0;
+            } catch(err) {
+                if(isCascadeAbortError(err)) throw err;
+                if(res?.status === 404) throw err;
+                consecutiveErrors += 1;
+                if(consecutiveErrors <= 5){
+                    await sleep(1800);
+                    continue;
+                }
+                throw err;
             }
-            const data = await res.json();
+            const latestFound = findPendingTask(taskId);
+            if(latestFound && data){
+                const {out: latestOut, pending: latestPending} = latestFound;
+                let changed = false;
+                let boundNewRecoverId = false;
+                const upstreamId = String(data.upstream_task_id || '').trim();
+                const stage = String(data.stage || '').trim();
+                if(upstreamId && latestPending.recoverTaskId !== upstreamId){
+                    latestPending.recoverTaskId = upstreamId;
+                    changed = true;
+                    boundNewRecoverId = true;
+                }
+                if(stage && latestPending.stage !== stage){
+                    latestPending.stage = stage;
+                    changed = true;
+                }
+                if(changed && latestOut){
+                    refreshNodes([latestOut.id]);
+                    if(boundNewRecoverId) scheduleSave();
+                }
+            }
             if(data.status === 'succeeded'){
                 completeCanvasImageTask(taskId, data.result || {});
                 return 'succeeded';
@@ -13782,7 +13857,11 @@ async function pollCanvasImageTask(taskId, options={}){
     } catch(err) {
         const message = normalizeCanvasTaskError(err, tr('canvas.generationFailed'));
         if(isCascadeAbortError(err)) return 'aborted';
-        failCanvasImageTask(taskId, message);
+        const latestPending = findPendingTask(taskId)?.pending;
+        failCanvasImageTask(taskId, message, {
+            upstream_task_id: latestPending?.recoverTaskId || '',
+            provider_id: latestPending?.providerId || ''
+        });
         return 'failed';
     } finally {
         activeCanvasTaskPolls.delete(taskId);
@@ -13833,7 +13912,7 @@ function failCanvasImageTask(taskId, message, taskData={}){
     const {out, pending} = found;
     const run = pending.run || {};
     const runMs = nowMs() - Number(pending.startedAt || nowMs());
-    const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || extractUpstreamTaskId(message);
+    const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || pending.recoverTaskId || extractUpstreamTaskId(message);
     const gen = nodes.find(n => n.id === run?.node?.id);
     if(recoverTaskId){
         pending.failed = true;

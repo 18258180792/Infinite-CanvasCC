@@ -5306,8 +5306,8 @@ function smartNodeHasDisplayResult(node){
 }
 function smartNodeHasCompletedResult(node){
     if(!smartNodeHasDisplayResult(node)) return false;
-    if(node?.runFinishedAt) return true;
-    return !node?.jimengPending && !smartPendingTasks(node).length && !Number(node?.pending || 0) && !node?.queued;
+    if(node?.jimengPending || smartPendingTasks(node).length || Number(node?.pending || 0) > 0 || node?.queued) return false;
+    return true;
 }
 function liveSmartNode(node){
     if(!node?.id) return node;
@@ -5457,7 +5457,7 @@ function mergeSmartNode(local, remote){
     }
     // 否则以对方（最新保存方）的布局/标题/设置为基底，但图片取并集——双方生成结果都不丢
     const merged = {...remote, images};
-    return smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued || smartPendingTasks(merged).length)
+    return smartNodeHasDisplayResult(merged) && (merged.pending || merged.queued) && !smartPendingTasks(merged).length && !merged.jimengPending
         ? completeSmartNodeWithImages(merged, images)
         : merged;
 }
@@ -8332,12 +8332,63 @@ function smartMinimaxBodyHtml(node){
     </div>`;
 }
 
+function shortUpstreamTaskId(id){
+    const value = String(id || '').trim();
+    if(!value) return '';
+    if(value.length <= 14) return value;
+    return `${value.slice(0, 8)}…${value.slice(-4)}`;
+}
+function smartPendingCellInnerHtml(task){
+    if(!task) return '';
+    if(task.recoverTaskId){
+        const fullId = escapeAttr(task.recoverTaskId);
+        const shortId = escapeHtml(shortUpstreamTaskId(task.recoverTaskId));
+        return `<button type="button" class="task-id-pill accepted" data-copy-task-id="${fullId}" title="点击复制完整任务 ID：${fullId}">已受理 · ${shortId}</button>`;
+    }
+    if(task.stage === 'downloading'){
+        return '<span class="task-id-pill">下载保存中…</span>';
+    }
+    if(task.stage === 'polling'){
+        return '<span class="task-id-pill">生成中…</span>';
+    }
+    return '<span class="task-id-pill">提交中…</span>';
+}
+function smartPendingStatusStripHtml(node){
+    const tasks = smartPendingTasks(node);
+    if(!tasks.length) return '';
+    const recoverable = tasks.filter(task => task.failed && task.recoverTaskId);
+    const active = tasks.filter(task => !(task.failed && task.recoverTaskId));
+    const parts = [];
+    if(active.length){
+        const chips = active.map(task => {
+            if(task.recoverTaskId){
+                const fullId = escapeAttr(task.recoverTaskId);
+                const shortId = escapeHtml(shortUpstreamTaskId(task.recoverTaskId));
+                return `<button type="button" class="task-id-pill accepted" data-copy-task-id="${fullId}" title="点击复制完整任务 ID：${fullId}">已受理 · ${shortId}</button>`;
+            }
+            const label = task.stage === 'downloading' ? '下载保存中…' : (task.stage === 'polling' ? '生成中…' : '提交中…');
+            return `<span class="task-id-pill">${label}</span>`;
+        }).join('');
+        parts.push(`<div class="smart-pending-strip-row"><span class="smart-pending-strip-label">其余 ${active.length} 张生成中</span><div class="smart-pending-strip-actions">${chips}</div></div>`);
+    }
+    recoverable.forEach(task => {
+        const querying = Boolean(task.querying);
+        const fullId = escapeAttr(task.recoverTaskId || '');
+        const shortId = escapeHtml(shortUpstreamTaskId(task.recoverTaskId || ''));
+        parts.push(`<div class="smart-pending-strip-row recoverable">
+            <button type="button" class="task-id-pill accepted" data-copy-task-id="${fullId}" title="点击复制完整任务 ID：${fullId}">任务未丢失 · ${shortId}</button>
+            <button type="button" class="jimeng-pending-query smart-pending-strip-btn" data-image-task-query="${escapeAttr(node.id)}" data-task-id="${escapeAttr(task.taskId)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
+        </div>`);
+    });
+    return `<div class="smart-pending-strip">${parts.join('')}</div>`;
+}
 function nodeBodyHtml(node, layout){
     if(node.type === 'smart-minimax') return smartMinimaxBodyHtml(node);
     if(node.type === 'smart-group') return smartGroupBodyHtml(node);
     if(node.type === 'smart-prompt') return promptNodeBodyHtml(node);
     if(node.type === 'smart-loop') return smartLoopBodyHtml(node);
     const imgs = (node.images || []).map(imageForDisplay);
+    const pendingList = smartPendingTasks(node);
     if(node.jimengPending && node.jimengPending.submitId && imgs.length === 0){
         return jimengPendingBodyHtml(node, layout);
     }
@@ -8345,22 +8396,22 @@ function nodeBodyHtml(node, layout){
     if(recoverTask && imgs.length === 0){
         return imageTaskRecoverBodyHtml(node, recoverTask, layout);
     }
-    if(node.queued && imgs.length === 0 && !node.pending){
+    if(node.queued && imgs.length === 0 && !node.pending && !pendingList.length){
         return `<div class="loading-cell single queued" style="width:${layout.width}px;height:${layout.height}px"></div>`;
     }
-    if(node.pending && imgs.length === 0){
-        const count = Math.max(1, Number(node.pending) || 1);
-        if(count <= 1) return `<div class="loading-cell single" style="width:${layout.width}px;height:${layout.height}px"></div>`;
+    if((node.pending || pendingList.length) && imgs.length === 0){
+        const count = Math.max(1, Number(node.pending) || pendingList.length || 1);
+        if(count <= 1) return `<div class="loading-cell single" style="width:${layout.width}px;height:${layout.height}px">${smartPendingCellInnerHtml(pendingList[0])}</div>`;
         const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(count))));
         const rows = Math.ceil(count / cols);
-        return `<div class="loading-skeleton" style="grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);width:${layout.width}px;height:${layout.height}px;padding:8px;box-sizing:border-box">${Array.from({length:count}).map(() => `<div class="loading-cell"></div>`).join('')}</div>`;
+        return `<div class="loading-skeleton" style="grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);width:${layout.width}px;height:${layout.height}px;padding:8px;box-sizing:border-box">${Array.from({length:count}).map((_, idx) => `<div class="loading-cell">${smartPendingCellInnerHtml(pendingList[idx])}</div>`).join('')}</div>`;
     }
     if(imgs.length > 1){
         const visibleRows = Math.max(1, Math.min(MEDIA_GROUP_MAX_VISIBLE_ROWS, Number(layout.visibleRows || layout.rows || 1)));
         const maxHeight = visibleRows * Number(layout.thumb || 96) + Math.max(0, visibleRows - 1) * 8;
-        return `<div class="thumb-grid" data-thumb-scroll="1" style="--thumb-cols:${layout.cols}; --thumb-size:${layout.thumb}px; --thumb-max-height:${maxHeight}px">${imgs.map((img, i) => `<div class="thumb-item has-outside-image-name ${selectedImage.nodeId === node.id && selectedImage.index === i ? 'image-selected' : ''}" data-image-index="${i}" data-media-signature="${escapeAttr(`${mediaKindForItem(img)}:${img?.url || ''}`)}">${thumbMediaHtml(img)}${imageNameBadgeHtml(img, {outside:true})}${imageResolutionBadgeHtml(img)}<button class="mini-x image-delete" type="button" data-image-index="${i}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`).join('')}</div>`;
+        return `<div class="thumb-grid" data-thumb-scroll="1" style="--thumb-cols:${layout.cols}; --thumb-size:${layout.thumb}px; --thumb-max-height:${maxHeight}px">${imgs.map((img, i) => `<div class="thumb-item has-outside-image-name ${selectedImage.nodeId === node.id && selectedImage.index === i ? 'image-selected' : ''}" data-image-index="${i}" data-media-signature="${escapeAttr(`${mediaKindForItem(img)}:${img?.url || ''}`)}">${thumbMediaHtml(img)}${imageNameBadgeHtml(img, {outside:true})}${imageResolutionBadgeHtml(img)}<button class="mini-x image-delete" type="button" data-image-index="${i}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`).join('')}</div>${smartPendingStatusStripHtml(node)}`;
     }
-    if(imgs[0]) return `<div class="image-wrap has-outside-image-name ${selectedImage.nodeId === node.id && selectedImage.index === 0 ? 'image-selected' : ''}" data-image-index="0" data-media-signature="${escapeAttr(`${mediaKindForItem(imgs[0])}:${imgs[0]?.url || ''}`)}" style="--node-img-w:${layout.width}px;--node-img-h:${layout.height}px">${singleMediaHtml(imgs[0], layout.width, layout.height)}${imageNameBadgeHtml(imgs[0], {outside:true})}${imageResolutionBadgeHtml(imgs[0])}<button class="mini-x image-delete" type="button" data-image-index="0" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`;
+    if(imgs[0]) return `<div class="image-wrap has-outside-image-name ${selectedImage.nodeId === node.id && selectedImage.index === 0 ? 'image-selected' : ''}" data-image-index="0" data-media-signature="${escapeAttr(`${mediaKindForItem(imgs[0])}:${imgs[0]?.url || ''}`)}" style="--node-img-w:${layout.width}px;--node-img-h:${layout.height}px">${singleMediaHtml(imgs[0], layout.width, layout.height)}${imageNameBadgeHtml(imgs[0], {outside:true})}${imageResolutionBadgeHtml(imgs[0])}<button class="mini-x image-delete" type="button" data-image-index="0" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>${smartPendingStatusStripHtml(node)}`;
     return `<div class="node-drop" data-upload-action="files">
         <span class="upload-node-main"><i data-lucide="upload-cloud"></i></span>
         <span class="upload-node-title">${escapeHtml(tr('smart.createImportNode'))}</span>
@@ -8387,12 +8438,14 @@ function imageTaskRecoverBodyHtml(node, task, layout){
     const querying = Boolean(task.querying);
     const failedCount = smartPendingTasks(node).filter(item => item.failed && item.recoverTaskId).length;
     const title = querying ? '查询中' : '任务未丢失';
-    const sub = failedCount > 1 ? `还有 ${failedCount} 个任务可查询` : `任务 ID：${task.recoverTaskId || ''}`;
+    const subHtml = failedCount > 1
+        ? `<div class="jimeng-pending-sub">${escapeHtml(`还有 ${failedCount} 个任务可查询`)}</div>`
+        : `<button type="button" class="jimeng-pending-sub task-id-copy-link" data-copy-task-id="${escapeAttr(task.recoverTaskId || '')}" title="点击复制完整任务 ID：${escapeAttr(task.recoverTaskId || '')}">${escapeHtml(`任务 ID：${task.recoverTaskId || ''}`)}</button>`;
     return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
         <div class="jimeng-pending-overlay">
             <div class="jimeng-pending-spinner"><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i></div>
             <div class="jimeng-pending-text">${escapeHtml(title)}</div>
-            <div class="jimeng-pending-sub">${escapeHtml(sub)}</div>
+            ${subHtml}
             <button class="jimeng-pending-query" type="button" data-image-task-query="${escapeAttr(node.id)}" data-task-id="${escapeAttr(task.taskId)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
         </div>
     </div>`;
@@ -8507,7 +8560,7 @@ async function runJimengUpscale(node, index){
         });
         if(!task.task_id) throw new Error(tr('smart.errRunFailed'));
         const live = liveSmartNode(target) || target;
-        live.pendingTasks = [{taskId:task.task_id, kind:'image', providerId, model:''}];
+        live.pendingTasks = [{taskId:task.task_id, kind:'image', providerId, model:'', prompt:`upscale ${resolution}`}];
         live.pending = 1;
         live.running = false;
         render();
@@ -8715,11 +8768,12 @@ function render(){
         const isCompactMember = isSmartGroupCompactMember(node);
         const isImageNode = node.type === 'smart-image' || !node.type;
         const isJimengPending = Boolean(node.jimengPending && node.jimengPending.submitId && imgs.length === 0);
-        const isQueued = Boolean(node.queued && imgs.length === 0 && !node.pending && !isJimengPending);
-        const isEmpty = isImageNode && imgs.length === 0 && !node.pending && !isQueued && !isJimengPending;
+        const hasPendingTasks = smartPendingTasks(node).length > 0;
+        const isQueued = Boolean(node.queued && imgs.length === 0 && !node.pending && !hasPendingTasks && !isJimengPending);
+        const isEmpty = isImageNode && imgs.length === 0 && !node.pending && !hasPendingTasks && !isQueued && !isJimengPending;
         const isHistory = isHistoryGroupNode(node);
         const isGroup = isImageNode && imgs.length > 1;
-        const isPending = ((node.pending || isQueued || isJimengPending) && imgs.length === 0);
+        const isPending = ((node.pending || hasPendingTasks || isQueued || isJimengPending) && imgs.length === 0);
         const body = nodeBodyHtml(node, layout);
         const starBtn = (!isEmpty && !isLoop) ? `<button class="mini-x sa-node-star-btn ${node.starred ? 'active' : ''}" type="button" data-star-node="${escapeHtml(node.id)}" title="${node.starred ? '取消定稿标记' : '标记为定稿'}"><i data-lucide="star"></i></button>` : '';
         const deleteBtn = (isGroup || isMinimax) ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
@@ -8733,7 +8787,7 @@ function render(){
             <div class="node-body">${body}</div>
             ${isCompactMember && (isPrompt || isLoop) ? '<div class="smart-group-member-grab" title="拖动移出分组"></div>' : ''}
             <div class="node-hint">${hint}</div>
-            ${imgs.length || node.pending || isQueued || isJimengPending || isPrompt || isLoop || isMinimax || isSmartGroup ? '<div class="node-resize-handle" data-resize="1"></div>' : ''}
+            ${imgs.length || node.pending || hasPendingTasks || isQueued || isJimengPending || isPrompt || isLoop || isMinimax || isSmartGroup ? '<div class="node-resize-handle" data-resize="1"></div>' : ''}
             <div class="node-port port-in" data-port="in" title="input"></div>
             <div class="node-port port-out" data-port="out" title="output"></div>
         </div>`;
@@ -10001,6 +10055,17 @@ function bindNodeEvents(){
             btn.addEventListener('click', e => {
                 e.preventDefault(); e.stopPropagation();
                 querySmartImageTaskNow(btn.dataset.imageTaskQuery, btn.dataset.taskId);
+            });
+        });
+        el.querySelectorAll('[data-copy-task-id]').forEach(btn => {
+            btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                const tid = String(btn.dataset.copyTaskId || '').trim();
+                if(!tid) return;
+                copyTextToClipboard(tid).then(ok => {
+                    toast(ok ? `已复制任务 ID：${tid}` : `任务 ID：${tid}`);
+                }).catch(() => toast(`任务 ID：${tid}`));
             });
         });
         el.querySelectorAll('[data-thumb-scroll]').forEach(scroller => {
@@ -16167,7 +16232,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 delete history.h;
                 outputSlot.images = [];
             }
-            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model}));
+            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model, prompt:taskResult.prompt || prompt || ''}));
             outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
             outputSlot.running = false;
             render();
@@ -16212,7 +16277,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             return [];
         }
         outputSlot.queued = false;
-        outputSlot.pending = 0;
+        if(!smartRecoverableImageTask(outputSlot)) outputSlot.pending = 0;
         outputSlot.running = false;
         throw e;
     } finally {
@@ -16620,7 +16685,7 @@ async function runGeneration(){
         if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
-            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model}));
+            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model, prompt:outImages.prompt || prompt || ''}));
             pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
@@ -16661,17 +16726,23 @@ async function runGeneration(){
             clearPromptInput({preserveDraft:true});
             return;
         }
-        pendingNode.pending = 0;
-        if(branchNode){
-            nodes = nodes.filter(n => n.id !== branchNode.id);
-            canvas.connections = (canvas.connections || []).filter(c => c.from !== branchNode.id && c.to !== branchNode.id);
-            selectedId = node.id;
+        const hasRecoverable = Boolean(smartRecoverableImageTask(pendingNode));
+        if(hasRecoverable){
+            pendingNode.pending = Math.max(1, smartPendingTasks(pendingNode).length);
+            pendingNode.running = false;
         } else {
             pendingNode.pending = 0;
-            pendingNode.running = false;
-            if(!(pendingNode.images || []).length){
-                delete pendingNode.w;
-                delete pendingNode.h;
+            if(branchNode && !(pendingNode.images || []).length){
+                nodes = nodes.filter(n => n.id !== branchNode.id);
+                canvas.connections = (canvas.connections || []).filter(c => c.from !== branchNode.id && c.to !== branchNode.id);
+                selectedId = node.id;
+            } else {
+                pendingNode.pending = 0;
+                pendingNode.running = false;
+                if(!(pendingNode.images || []).length){
+                    delete pendingNode.w;
+                    delete pendingNode.h;
+                }
             }
         }
         if(extracted) restoreFromExtraction(node, extracted);
@@ -16811,7 +16882,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         if(!r.ok) throw new Error(await r.text());
         return r.json();
     })));
-    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};
+    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model, prompt:payload.prompt || ''};
 }
 function smartCompactJson(value, max=4200){
     let text = '';
@@ -17399,6 +17470,7 @@ class ImageTaskRecoverSignal extends Error {
         this.recoverTaskId = data.recoverTaskId || data.upstream_task_id || data.task_id || '';
         this.providerId = data.providerId || data.provider_id || '';
         this.kind = data.kind || 'image';
+        this.autoQuery = Boolean(data.autoQuery);
     }
 }
 function extractUpstreamTaskId(text){
@@ -17517,11 +17589,17 @@ async function queryJimengNow(nodeId){
 function providerIdForSmartTask(node, task){
     return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';
 }
-async function fetchImageTaskQuery(providerId, taskId, model=''){
+async function fetchImageTaskQuery(providerId, taskId, model='', prompt='', currentCanvasId=''){
     return fetch('/api/image-task-query', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({provider_id:providerId || 'comfly', task_id:taskId, model})
+        body:JSON.stringify({
+            provider_id:providerId || 'comfly',
+            task_id:taskId,
+            model:model || '',
+            prompt:prompt || '',
+            canvas_id:currentCanvasId || ''
+        })
     }).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
@@ -17541,7 +17619,14 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     task.recoverTaskId = recoverTaskId;
     render();
     try {
-        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId, task.model || node?.runSettings?.model || '');
+        const activeCanvasId = (typeof canvas !== 'undefined' && canvas?.id) ? canvas.id : (typeof canvasId !== 'undefined' ? canvasId : '');
+        const data = await fetchImageTaskQuery(
+            providerIdForSmartTask(node, task),
+            recoverTaskId,
+            task.model || node?.runSettings?.model || '',
+            task.prompt || node?.runPrompt || '',
+            activeCanvasId || ''
+        );
         if(data.status === 'succeeded'){
             task.failed = false;
             task.querying = false;
@@ -17602,6 +17687,47 @@ function resumeJimengPendingNodes(){
 }
 const smartTaskWsSnapshots = new Map();
 const smartTaskWsWakeups = new Map();
+function findSmartPendingTaskById(localTaskId){
+    const target = String(localTaskId || '').trim();
+    if(!target || !Array.isArray(nodes)) return null;
+    for(const node of nodes){
+        const task = smartPendingTasks(node).find(item => item.taskId === target);
+        if(task) return {node, task};
+    }
+    return null;
+}
+function syncSmartPendingTaskProgress(localTaskId, taskSnap){
+    if(!localTaskId || !taskSnap || typeof taskSnap !== 'object') return false;
+    const found = findSmartPendingTaskById(localTaskId);
+    if(!found) return false;
+    const {task} = found;
+    let changed = false;
+    let boundNewRecoverId = false;
+    const upstreamId = String(taskSnap.upstream_task_id || '').trim();
+    const stage = String(taskSnap.stage || '').trim();
+    const providerId = String(taskSnap.provider_id || '').trim();
+    const model = String(taskSnap.model || '').trim();
+    if(upstreamId && task.recoverTaskId !== upstreamId){
+        task.recoverTaskId = upstreamId;
+        changed = true;
+        boundNewRecoverId = true;
+    }
+    if(stage && task.stage !== stage){
+        task.stage = stage;
+        changed = true;
+    }
+    if(providerId && !task.providerId){
+        task.providerId = providerId;
+        changed = true;
+    }
+    if(model && !task.model){
+        task.model = model;
+        changed = true;
+    }
+    if(changed && typeof render === 'function') render();
+    if(boundNewRecoverId && typeof scheduleSave === 'function') scheduleSave(150);
+    return changed;
+}
 function handleCanvasTaskUpdatedMessage(data={}){
     const taskId = String(data?.task_id || data?.task?.id || '').trim();
     if(!taskId || !data?.task) return;
@@ -17610,6 +17736,7 @@ function handleCanvasTaskUpdatedMessage(data={}){
         const oldestKey = smartTaskWsSnapshots.keys().next().value;
         if(oldestKey) smartTaskWsSnapshots.delete(oldestKey);
     }
+    syncSmartPendingTaskProgress(taskId, data.task);
     const wake = smartTaskWsWakeups.get(taskId);
     if(typeof wake === 'function') wake(data.task);
 }
@@ -17621,17 +17748,20 @@ async function pollSmartCanvasTask(taskId){
         if(task.status === 'succeeded') return task.result || {};
         if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
         if(task.status === 'failed'){
-            const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
-            if(recoverTaskId) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
+            const bound = findSmartPendingTaskById(taskId)?.task;
+            const recoverTaskId = task.upstream_task_id || bound?.recoverTaskId || extractUpstreamTaskId(task.error || '');
+            if(recoverTaskId) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id || bound?.providerId || '', kind:'image', message:task.error || tr('smart.errRunFailed')});
             throw new Error(task.error || tr('smart.errRunFailed'));
         }
         return undefined;
     };
     const promise = (async () => {
+        let consecutiveErrors = 0;
         for(let i = 0; i < 1500; i++){
             const cachedWs = smartTaskWsSnapshots.get(taskId);
             if(cachedWs){
                 smartTaskWsSnapshots.delete(taskId);
+                syncSmartPendingTaskProgress(taskId, cachedWs);
                 const wsOut = resolveTaskPayload(cachedWs);
                 if(wsOut !== undefined) return wsOut;
             }
@@ -17649,14 +17779,58 @@ async function pollSmartCanvasTask(taskId){
                     });
                 });
                 if(wsPushed){
+                    syncSmartPendingTaskProgress(taskId, wsPushed);
                     const pushedOut = resolveTaskPayload(wsPushed);
                     if(pushedOut !== undefined) return pushedOut;
                 }
             }
-            const task = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`).then(async r => {
-                if(!r.ok) throw new Error(await r.text());
-                return r.json();
-            });
+            let resStatus = 0;
+            let task = null;
+            let fetchErr = null;
+            try {
+                const r = await fetch(`/api/canvas-image-tasks/${encodeURIComponent(taskId)}`);
+                resStatus = r.status;
+                if(!r.ok){
+                    const errText = await r.text().catch(() => '');
+                    throw new Error(errText || `HTTP ${r.status}`);
+                }
+                task = await r.json();
+                consecutiveErrors = 0;
+            } catch(err) {
+                fetchErr = err;
+            }
+            if(fetchErr){
+                const bound = findSmartPendingTaskById(taskId)?.task;
+                if(resStatus === 404){
+                    if(bound?.recoverTaskId){
+                        throw new ImageTaskRecoverSignal({
+                            taskId,
+                            recoverTaskId: bound.recoverTaskId,
+                            providerId: bound.providerId || '',
+                            kind: bound.kind || 'image',
+                            autoQuery: true,
+                            message: '服务已重启或任务快照过期，已保留上游任务 ID，可查询结果'
+                        });
+                    }
+                    throw fetchErr;
+                }
+                consecutiveErrors += 1;
+                if(consecutiveErrors <= 5){
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                    continue;
+                }
+                if(bound?.recoverTaskId){
+                    throw new ImageTaskRecoverSignal({
+                        taskId,
+                        recoverTaskId: bound.recoverTaskId,
+                        providerId: bound.providerId || '',
+                        kind: bound.kind || 'image',
+                        message: fetchErr.message || '连接中断，已保留上游任务 ID，可手动查询结果'
+                    });
+                }
+                throw fetchErr;
+            }
+            syncSmartPendingTaskProgress(taskId, task);
             const out = resolveTaskPayload(task);
             if(out !== undefined) return out;
         }
@@ -17747,9 +17921,15 @@ async function resumeSmartPendingNode(node, logContext={}){
                 node.running = false;
                 node.pending = Math.max(1, smartPendingTasks(node).length);
                 logTaskFailure(task.error, task);
-                toast('任务未丢失，可稍后手动查询结果');
-                render();
-                scheduleSave();
+                if(e.autoQuery){
+                    render();
+                    scheduleSave();
+                    setTimeout(() => { querySmartImageTaskNow(node.id, task.taskId); }, 50);
+                } else {
+                    toast('任务未丢失，可稍后手动查询结果');
+                    render();
+                    scheduleSave();
+                }
                 return;
             }
             node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
@@ -17770,7 +17950,7 @@ async function resumeSmartPendingNode(node, logContext={}){
             scheduleSave();
         }
     }));
-    if(failures.length && !(node.images || []).length){
+    if(failures.length && !(node.images || []).length && !smartRecoverableImageTask(node)){
         throw failures[0];
     }
 }

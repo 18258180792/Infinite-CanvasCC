@@ -202,7 +202,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
-APP_VERSION = "2026.11.21.2"
+APP_VERSION = "2026.11.23.1"
 GITHUB_REPO_URL = "https://github.com/18258180792/Infinite-CanvasCC"
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/18258180792/Infinite-CanvasCC/main/VERSION"
 GITHUB_TREE_URL = "https://api.github.com/repos/18258180792/Infinite-CanvasCC/git/trees/main?recursive=1"
@@ -729,9 +729,12 @@ ONLINE_IMAGE_REFERENCE_MAX = int(os.getenv("ONLINE_IMAGE_REFERENCE_MAX", "20"))
 # --- 全局 HTTP Keep-Alive 连接池与智能代理快通道 ---
 _ORIGINAL_HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 _ORIGINAL_REQUESTS_GET = requests.get
-_SHARED_ASYNC_CLIENTS: Dict[Tuple[int, bool, bool], httpx.AsyncClient] = {}
+_SHARED_ASYNC_CLIENTS: Dict[Tuple[int, bool, bool, Tuple[Tuple[str, str], ...]], httpx.AsyncClient] = {}
+_SHARED_ASYNC_CLIENT_REFS: Dict[int, int] = {}
+_RETIRED_ASYNC_CLIENTS: Dict[int, httpx.AsyncClient] = {}
 _SHARED_REQUESTS_SESSIONS: Dict[bool, requests.Session] = {}
 _SHARED_HTTP_LOCK = Lock()
+IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS = int(os.getenv("IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS", "4"))
 
 
 def provider_trust_env(provider: Optional[dict] = None) -> bool:
@@ -742,12 +745,95 @@ def provider_trust_env(provider: Optional[dict] = None) -> bool:
     return True
 
 
+def _current_proxy_signature(trust_env: bool) -> Tuple[Tuple[str, str], ...]:
+    if not trust_env:
+        return ()
+    try:
+        proxies = urllib.request.getproxies() or {}
+    except Exception:
+        return ()
+    if not isinstance(proxies, dict):
+        return ()
+    return tuple(sorted(
+        (str(k).strip().lower(), str(v).strip())
+        for k, v in proxies.items()
+        if str(v or "").strip()
+    ))
+
+
+def _proxy_sig_targets_loopback(proxy_sig: Tuple[Tuple[str, str], ...]) -> bool:
+    for key, val in proxy_sig or ():
+        if key not in {"http", "https", "all"}:
+            continue
+        raw = str(val or "").strip()
+        if not raw:
+            continue
+        parsed = urllib.parse.urlsplit(raw if "://" in raw else f"http://{raw}")
+        host = (parsed.hostname or "").strip().lower()
+        if host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+            return True
+    return False
+
+
+def _build_shared_async_client(
+    default_timeout: Any,
+    limits: httpx.Limits,
+    trust_env: bool,
+    follow_redirects: bool,
+) -> httpx.AsyncClient:
+    try:
+        return _ORIGINAL_HTTPX_ASYNC_CLIENT(
+            timeout=default_timeout,
+            limits=limits,
+            trust_env=bool(trust_env),
+            follow_redirects=bool(follow_redirects),
+        )
+    except ImportError as exc:
+        if "socksio" not in str(exc).lower() or not trust_env:
+            raise
+        LOG.warning("httpx_socksio_missing_fallback err=%s", exc)
+        try:
+            proxies = urllib.request.getproxies() or {}
+        except Exception:
+            proxies = {}
+        http_proxy = ""
+        for scheme in ("https", "http"):
+            cand = str(proxies.get(scheme) or "").strip()
+            if cand and not cand.lower().startswith("socks"):
+                http_proxy = cand if "://" in cand else f"http://{cand}"
+                break
+        if http_proxy:
+            return _ORIGINAL_HTTPX_ASYNC_CLIENT(
+                timeout=default_timeout,
+                limits=limits,
+                proxy=http_proxy,
+                trust_env=False,
+                follow_redirects=bool(follow_redirects),
+            )
+        return _ORIGINAL_HTTPX_ASYNC_CLIENT(
+            timeout=default_timeout,
+            limits=limits,
+            trust_env=False,
+            follow_redirects=bool(follow_redirects),
+        )
+
+
 class _TimeoutScopedAsyncClient:
     """在不关闭共享连接池的前提下，为每次调用绑定独立的请求级 timeout。"""
 
-    def __init__(self, client: httpx.AsyncClient, timeout: Any):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        timeout: Any,
+        proxy_sig: Tuple[Tuple[str, str], ...] = (),
+        trust_env: bool = True,
+        follow_redirects: bool = False,
+    ):
         self._client = client
         self._timeout = timeout
+        self._proxy_sig = proxy_sig
+        self._trust_env = bool(trust_env)
+        self._follow_redirects = bool(follow_redirects)
 
     def _with_timeout(self, kwargs: dict) -> dict:
         if "timeout" not in kwargs and self._timeout is not None:
@@ -779,24 +865,101 @@ async def shared_async_http_client(timeout: Any = None, trust_env: bool = True, 
             yield client
         return
     loop = asyncio.get_running_loop()
-    key = (id(loop), bool(trust_env), bool(follow_redirects))
+    use_trust_env = bool(trust_env)
+    use_redirects = bool(follow_redirects)
+    proxy_sig = _current_proxy_signature(use_trust_env)
+    key = (id(loop), use_trust_env, use_redirects, proxy_sig)
+    stale_keys = [
+        k for k in list(_SHARED_ASYNC_CLIENTS.keys())
+        if k[:3] == (id(loop), use_trust_env, use_redirects) and k != key
+    ]
+    for stale_key in stale_keys:
+        stale_client = _SHARED_ASYNC_CLIENTS.pop(stale_key, None)
+        if stale_client is not None and not stale_client.is_closed:
+            if _SHARED_ASYNC_CLIENT_REFS.get(id(stale_client), 0) <= 0:
+                try:
+                    await stale_client.aclose()
+                except Exception:
+                    pass
+            else:
+                _RETIRED_ASYNC_CLIENTS[id(stale_client)] = stale_client
     client = _SHARED_ASYNC_CLIENTS.get(key)
     if client is None or client.is_closed:
         limits = httpx.Limits(max_connections=100, max_keepalive_connections=32, keepalive_expiry=60.0)
         default_timeout = httpx.Timeout(connect=20.0, read=600.0, write=120.0, pool=20.0)
-        client = _ORIGINAL_HTTPX_ASYNC_CLIENT(
-            timeout=default_timeout,
-            limits=limits,
-            trust_env=bool(trust_env),
-            follow_redirects=bool(follow_redirects),
-        )
+        client = _build_shared_async_client(default_timeout, limits, use_trust_env, use_redirects)
         _SHARED_ASYNC_CLIENTS[key] = client
-    yield _TimeoutScopedAsyncClient(client, timeout)
+    client_id = id(client)
+    _SHARED_ASYNC_CLIENT_REFS[client_id] = _SHARED_ASYNC_CLIENT_REFS.get(client_id, 0) + 1
+    try:
+        yield _TimeoutScopedAsyncClient(
+            client,
+            timeout,
+            proxy_sig=proxy_sig,
+            trust_env=use_trust_env,
+            follow_redirects=use_redirects,
+        )
+    finally:
+        remaining = _SHARED_ASYNC_CLIENT_REFS.get(client_id, 1) - 1
+        if remaining <= 0:
+            _SHARED_ASYNC_CLIENT_REFS.pop(client_id, None)
+            retired = _RETIRED_ASYNC_CLIENTS.pop(client_id, None)
+            if retired is not None and not retired.is_closed:
+                try:
+                    await retired.aclose()
+                except Exception:
+                    pass
+        else:
+            _SHARED_ASYNC_CLIENT_REFS[client_id] = remaining
+
+
+async def post_with_safe_proxy_fallback(
+    client,
+    url: str,
+    *,
+    provider: Optional[dict] = None,
+    timeout: Any = None,
+    follow_redirects: bool = False,
+    **kwargs,
+):
+    """仅当连接本地代理失败（请求根本未离开本机）时安全回退直连重发 POST；绝不在已建连后的读/协议中断时重试，避免重复扣费。"""
+    try:
+        return await client.post(url, **kwargs)
+    except (httpx.ProxyError, httpx.ConnectError) as exc:
+        proxy_sig = getattr(client, "_proxy_sig", ())
+        can_fallback = (
+            httpx.AsyncClient is _ORIGINAL_HTTPX_ASYNC_CLIENT
+            and isinstance(client, _TimeoutScopedAsyncClient)
+            and bool(proxy_sig)
+            and provider_trust_env(provider)
+            and (isinstance(exc, httpx.ProxyError) or _proxy_sig_targets_loopback(proxy_sig))
+        )
+        if not can_fallback:
+            raise
+        LOG.warning("local_proxy_post_fallback_direct url=%s err=%s", url, type(exc).__name__)
+        files = kwargs.get("files")
+        if isinstance(files, (list, tuple)):
+            for item in files:
+                file_tuple = item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else None
+                file_obj = file_tuple[1] if isinstance(file_tuple, (list, tuple)) and len(file_tuple) >= 2 else None
+                if hasattr(file_obj, "seek"):
+                    try:
+                        file_obj.seek(0)
+                    except Exception:
+                        pass
+        async with shared_async_http_client(
+            timeout=timeout or getattr(client, "_timeout", None),
+            trust_env=False,
+            follow_redirects=follow_redirects or getattr(client, "_follow_redirects", False),
+        ) as direct_client:
+            return await direct_client.post(url, **kwargs)
 
 
 async def close_shared_http_clients():
-    clients = list(_SHARED_ASYNC_CLIENTS.values())
+    clients = list(_SHARED_ASYNC_CLIENTS.values()) + list(_RETIRED_ASYNC_CLIENTS.values())
     _SHARED_ASYNC_CLIENTS.clear()
+    _RETIRED_ASYNC_CLIENTS.clear()
+    _SHARED_ASYNC_CLIENT_REFS.clear()
     for client in clients:
         try:
             if not client.is_closed:
@@ -834,7 +997,12 @@ def shared_requests_get(url: str, trust_env: bool = True, fallback_direct: bool 
     session = _get_shared_requests_session(trust_env=trust_env)
     try:
         return session.get(url, **kwargs)
-    except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError):
+    except (
+        requests.exceptions.ProxyError,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ChunkedEncodingError,
+    ):
         if trust_env and fallback_direct:
             direct_session = _get_shared_requests_session(trust_env=False)
             return direct_session.get(url, **kwargs)
@@ -3011,9 +3179,84 @@ class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
     task_id: str = Field(min_length=1, max_length=240)
     model: str = ""
+    prompt: str = ""
+    canvas_id: str = ""
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
+CANVAS_TASKS_MAX_ITEMS = 400
+_ACTIVE_CANVAS_TASK_ID: contextvars.ContextVar[str] = contextvars.ContextVar("active_canvas_task_id", default="")
+
+
+def _prune_canvas_tasks_locked(now: Optional[float] = None):
+    now_ts = time.time() if now is None else now
+    cutoff = now_ts - 7200.0
+    terminal = {"succeeded", "failed", "jimeng_pending"}
+    stale_ids = [
+        tid for tid, item in CANVAS_TASKS.items()
+        if str(item.get("status") or "") in terminal and float(item.get("updated_at") or item.get("created_at") or 0) < cutoff
+    ]
+    for tid in stale_ids:
+        CANVAS_TASKS.pop(tid, None)
+    if len(CANVAS_TASKS) <= CANVAS_TASKS_MAX_ITEMS:
+        return
+    removable = sorted(
+        (
+            (float(item.get("updated_at") or item.get("created_at") or 0), tid)
+            for tid, item in CANVAS_TASKS.items()
+            if str(item.get("status") or "") in terminal
+        )
+    )
+    overflow = len(CANVAS_TASKS) - CANVAS_TASKS_MAX_ITEMS
+    for _, tid in removable[:overflow]:
+        CANVAS_TASKS.pop(tid, None)
+
+
+def _current_canvas_upstream_task_id(local_task_id: str = "") -> str:
+    lid = local_task_id or _ACTIVE_CANVAS_TASK_ID.get()
+    if not lid:
+        return ""
+    with CANVAS_TASK_LOCK:
+        return str((CANVAS_TASKS.get(lid) or {}).get("upstream_task_id") or "").strip()
+
+
+async def report_canvas_task_progress(
+    stage: str = "",
+    upstream_task_id: str = "",
+    provider_id: str = "",
+    model: str = "",
+    message: str = "",
+):
+    local_id = _ACTIVE_CANVAS_TASK_ID.get()
+    tid = str(upstream_task_id or "").strip()
+    if tid:
+        LOG.info(
+            "image_async_submitted local_task_id=%s provider=%s model=%s upstream_task_id=%s",
+            local_id or "-",
+            provider_id or "-",
+            model or "-",
+            tid,
+        )
+    if not local_id:
+        return
+    changed = False
+    with CANVAS_TASK_LOCK:
+        entry = CANVAS_TASKS.get(local_id)
+        if entry is None:
+            return
+        if stage and entry.get("stage") != stage:
+            entry["stage"] = stage
+            changed = True
+        if tid and entry.get("upstream_task_id") != tid:
+            entry["upstream_task_id"] = tid
+            changed = True
+        if message and entry.get("message") != message:
+            entry["message"] = message
+            changed = True
+        if changed:
+            entry["updated_at"] = time.time()
+    if changed:
+        await _notify_canvas_task_ws(local_id)
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -5068,7 +5311,7 @@ RESPONSES_REJECT_STATUSES = {400, 404, 405, 415, 422}
 RESPONSES_POLL_INTERVAL = 5.0
 RESPONSES_POLL_MAX_SECONDS = 1500.0
 
-async def post_openai_responses(client, url, headers, body):
+async def post_openai_responses(client, url, headers, body, provider=None):
     """RS / Responses 请求。图片编辑经常超过 120 秒，非流式请求会被中转前面的
     Cloudflare 读超时掐断（Error 524）。策略按可靠性排序：
     1) background:true 后台任务 + 轮询 GET /v1/responses/{id}（每个请求都秒回，彻底绕开超时）；
@@ -5078,7 +5321,7 @@ async def post_openai_responses(client, url, headers, body):
     bg_body = dict(body)
     bg_body["background"] = True
     try:
-        resp = await client.post(url, headers=headers, json=bg_body)
+        resp = await post_with_safe_proxy_fallback(client, url, provider=provider, headers=headers, json=bg_body)
     except httpx.HTTPError as e:
         print(f"RS background 请求传输失败，改走流式：{e}")
         return await post_openai_responses_stream(client, url, headers, body)
@@ -5451,8 +5694,16 @@ async def generate_tudou_async_image(prompt, size, quality, model, reference_ima
     if images:
         body["images"] = images
     endpoint = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/images/generations/async")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=180.0, write=120.0, pool=20.0)) as client:
-        response = await client.post(endpoint, headers=api_headers(provider=provider, model=body["model"]), json=body)
+    timeout = httpx.Timeout(connect=20.0, read=180.0, write=120.0, pool=20.0)
+    async with shared_async_http_client(timeout=timeout, trust_env=provider_trust_env(provider)) as client:
+        response = await post_with_safe_proxy_fallback(
+            client,
+            endpoint,
+            provider=provider,
+            timeout=timeout,
+            headers=api_headers(provider=provider, model=body["model"]),
+            json=body,
+        )
         response.raise_for_status()
         raw = response.json()
         task_id = extract_task_id(raw) if isinstance(raw, dict) else None
@@ -5461,8 +5712,22 @@ async def generate_tudou_async_image(prompt, size, quality, model, reference_ima
                 return extract_image(raw), raw
             except HTTPException as exc:
                 raise HTTPException(status_code=502, detail=f"土豆异步生图未返回 task_id：{str(raw)[:500]}") from exc
-        result = await wait_for_image_task(client, task_id, provider)
-        return extract_image(result), result
+        await report_canvas_task_progress(
+            stage="polling",
+            upstream_task_id=task_id,
+            provider_id=(provider or {}).get("id", ""),
+            model=body["model"],
+        )
+        try:
+            result = await wait_for_image_task(client, task_id, provider)
+            return extract_image(result), result
+        except HTTPException as exc:
+            setattr(exc, "upstream_task_id", task_id)
+            raise
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            error = HTTPException(status_code=502, detail=f"土豆生图任务查询连接异常，task_id={task_id}；任务已受理未丢失，可稍后点击查询结果。")
+            setattr(error, "upstream_task_id", task_id)
+            raise error from exc
 
 def is_tudou_grok_image_model(model):
     return str(model or "").strip().lower().startswith("grok-imagine-image")
@@ -7479,39 +7744,95 @@ def requests_get_with_transient_retries(url, attempts=3, retry_delay=0.35, **kwa
         return response
     raise requests.RequestException(f"请求失败：GET {host}")
 
+def _is_live_scoped_http_client(client) -> bool:
+    return httpx.AsyncClient is _ORIGINAL_HTTPX_ASYNC_CLIENT and isinstance(client, _TimeoutScopedAsyncClient)
+
+
+async def _poll_with_live_client_and_fallback(
+    client,
+    method: str,
+    url: str,
+    *,
+    provider: Optional[dict] = None,
+    timeout: Any = IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+    hard_timeout: Optional[float] = IMAGE_TASK_POLL_HARD_TIMEOUT,
+    attempts: int = 3,
+    retry_delay: float = 0.8,
+    follow_redirects: bool = True,
+    **kwargs,
+):
+    if not _is_live_scoped_http_client(client):
+        return await httpx_request_with_transient_retries(
+            client,
+            method,
+            url,
+            attempts=attempts,
+            retry_delay=retry_delay,
+            hard_timeout=hard_timeout,
+            timeout=timeout,
+            **kwargs,
+        )
+    prefer_proxy = provider_trust_env(provider)
+    async with shared_async_http_client(
+        timeout=timeout,
+        trust_env=prefer_proxy,
+        follow_redirects=follow_redirects,
+    ) as active_client:
+        try:
+            return await httpx_request_with_transient_retries(
+                active_client,
+                method,
+                url,
+                attempts=attempts,
+                retry_delay=retry_delay,
+                hard_timeout=hard_timeout,
+                timeout=timeout,
+                **kwargs,
+            )
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+            httpx.ReadError,
+            httpx.WriteError,
+        ):
+            if prefer_proxy and bool(getattr(active_client, "_proxy_sig", ())):
+                LOG.warning("image_poll_proxy_fallback_direct method=%s url=%s", method, url)
+                async with shared_async_http_client(
+                    timeout=timeout,
+                    trust_env=False,
+                    follow_redirects=follow_redirects,
+                ) as direct_client:
+                    return await httpx_request_with_transient_retries(
+                        direct_client,
+                        method,
+                        url,
+                        attempts=2,
+                        retry_delay=0.6,
+                        hard_timeout=hard_timeout,
+                        timeout=timeout,
+                        **kwargs,
+                    )
+            raise
+
+
 async def fetch_image_task_payload(client, task_id, provider=None, model=""):
     task_url = image_task_url_for_provider(provider, task_id)
     headers = api_headers(provider=provider, model=model)
-    try:
-        response = await httpx_request_with_transient_retries(
-            client,
-            "GET",
-            task_url,
-            attempts=3,
-            retry_delay=0.8,
-            hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
-            timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-            headers=headers,
-        )
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ProxyError):
-        if provider_trust_env(provider) and httpx.AsyncClient is _ORIGINAL_HTTPX_ASYNC_CLIENT:
-            async with shared_async_http_client(
-                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-                trust_env=False,
-                follow_redirects=True,
-            ) as direct_client:
-                response = await httpx_request_with_transient_retries(
-                    direct_client,
-                    "GET",
-                    task_url,
-                    attempts=2,
-                    retry_delay=0.6,
-                    hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
-                    timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-                    headers=headers,
-                )
-        else:
-            raise
+    response = await _poll_with_live_client_and_fallback(
+        client,
+        "GET",
+        task_url,
+        provider=provider,
+        timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+        hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+        attempts=3,
+        retry_delay=0.8,
+        follow_redirects=True,
+        headers=headers,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -7525,13 +7846,32 @@ async def wait_for_image_task(client, task_id, provider=None, response_validator
     deadline = started + timeout
     last_payload = {}
     poll_count = 0
+    consecutive_poll_errors = 0
+    is_live_client = _is_live_scoped_http_client(client)
     while time.monotonic() < deadline:
         if initial_delay:
             await asyncio.sleep(min(initial_delay, max(0.0, deadline - time.monotonic())))
             initial_delay = 0
             if time.monotonic() >= deadline:
                 break
-        last_payload = await fetch_image_task_payload(client, task_id, provider, model=model)
+        try:
+            last_payload = await fetch_image_task_payload(client, task_id, provider, model=model)
+            consecutive_poll_errors = 0
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.HTTPError as exc:
+            if is_live_client and consecutive_poll_errors < IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS:
+                consecutive_poll_errors += 1
+                LOG.warning(
+                    "image_task_poll_transient_retry task_id=%s consecutive=%s/%s err=%s",
+                    task_id,
+                    consecutive_poll_errors,
+                    IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(min(2.0 * consecutive_poll_errors, max(0.0, deadline - time.monotonic())))
+                continue
+            raise
         poll_count += 1
         if response_validator:
             response_validator(last_payload)
@@ -10877,7 +11217,14 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                     ),
                     timeout=25.0,
                 )
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError):
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+            httpx.ReadError,
+        ):
             if prefer_proxy and httpx.AsyncClient is _ORIGINAL_HTTPX_ASYNC_CLIENT:
                 async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=False) as direct_client:
                     response = await asyncio.wait_for(
@@ -11619,7 +11966,13 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
 
     api_root = modelscope_image_api_root()
     async with shared_async_http_client(timeout=AI_REQUEST_TIMEOUT, trust_env=provider_trust_env(provider)) as client:
-        submit_res = await client.post(f"{api_root}/images/generations", headers=headers, json=payload)
+        submit_res = await post_with_safe_proxy_fallback(
+            client,
+            f"{api_root}/images/generations",
+            provider=provider,
+            headers=headers,
+            json=payload,
+        )
         submit_res.raise_for_status()
         raw = submit_res.json()
         task_id = raw.get("task_id")
@@ -11629,33 +11982,67 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
             except HTTPException:
                 raise HTTPException(status_code=502, detail=f"ModelScope 未返回 task_id：{raw}")
 
+        await report_canvas_task_progress(
+            stage="polling",
+            upstream_task_id=str(task_id),
+            provider_id=(provider or {}).get("id", "modelscope"),
+            model=payload["model"],
+        )
         deadline = time.monotonic() + AI_REQUEST_TIMEOUT
         last_payload = raw
-        while time.monotonic() < deadline:
-            await asyncio.sleep(IMAGE_POLL_INTERVAL)
-            result = await httpx_request_with_transient_retries(
-                client,
-                "GET",
-                f"{api_root}/tasks/{task_id}",
-                attempts=3,
-                retry_delay=0.8,
-                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
-                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-                headers={**headers, "X-ModelScope-Task-Type": "image_generation"},
-            )
-            result.raise_for_status()
-            data = result.json()
-            last_payload = data
-            status = str(data.get("task_status") or "").upper()
-            if status == "SUCCEED":
-                images = data.get("output_images") or []
-                if not images:
-                    raise HTTPException(status_code=502, detail=f"ModelScope 成功但没有返回图片：{data}")
-                return {"type": "url", "value": images[0]}, data
-            if status in {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED", "TIMEOUT", "REVOKED"}:
-                detail = data.get("error_info") or data.get("message") or data.get("detail") or str(data)
-                raise HTTPException(status_code=502, detail=f"ModelScope 任务失败：{detail}")
-        raise HTTPException(status_code=504, detail=f"ModelScope 生图任务超时：{last_payload}")
+        consecutive_poll_errors = 0
+        is_live_client = _is_live_scoped_http_client(client)
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(IMAGE_POLL_INTERVAL)
+                try:
+                    result = await _poll_with_live_client_and_fallback(
+                        client,
+                        "GET",
+                        f"{api_root}/tasks/{task_id}",
+                        provider=provider,
+                        attempts=3,
+                        retry_delay=0.8,
+                        hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                        timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                        headers={**headers, "X-ModelScope-Task-Type": "image_generation"},
+                    )
+                    result.raise_for_status()
+                    consecutive_poll_errors = 0
+                except httpx.HTTPStatusError:
+                    raise
+                except httpx.HTTPError as exc:
+                    if is_live_client and consecutive_poll_errors < IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS:
+                        consecutive_poll_errors += 1
+                        LOG.warning(
+                            "modelscope_poll_transient_retry task_id=%s consecutive=%s/%s err=%s",
+                            task_id,
+                            consecutive_poll_errors,
+                            IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS,
+                            type(exc).__name__,
+                        )
+                        await asyncio.sleep(min(2.0 * consecutive_poll_errors, max(0.0, deadline - time.monotonic())))
+                        continue
+                    raise
+                data = result.json()
+                last_payload = data
+                status = str(data.get("task_status") or "").upper()
+                if status == "SUCCEED":
+                    images = data.get("output_images") or []
+                    if not images:
+                        raise HTTPException(status_code=502, detail=f"ModelScope 成功但没有返回图片：{data}")
+                    return {"type": "url", "value": images[0]}, data
+                if status in {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED", "TIMEOUT", "REVOKED"}:
+                    detail = data.get("error_info") or data.get("message") or data.get("detail") or str(data)
+                    raise HTTPException(status_code=502, detail=f"ModelScope 任务失败：{detail}")
+            raise HTTPException(status_code=504, detail=f"ModelScope 生图任务超时，task_id={task_id}：{last_payload}")
+        except HTTPException as exc:
+            setattr(exc, "upstream_task_id", str(task_id))
+            raise
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            error = HTTPException(status_code=502, detail=f"ModelScope 任务查询连接异常，task_id={task_id}；任务已受理未丢失，可稍后点击查询结果。")
+            setattr(error, "upstream_task_id", str(task_id))
+            raise error from exc
 
 def gemini_model_name(model):
     value = selected_model(model, "gemini-3-pro-image-preview").strip()
@@ -12411,20 +12798,40 @@ async def wait_for_runninghub_image_task(client, provider, task_id):
     query_url = runninghub_openapi_url(provider, "query")
     deadline = time.monotonic() + 1800
     last_payload = None
+    consecutive_poll_errors = 0
+    is_live_client = _is_live_scoped_http_client(client)
     while time.monotonic() < deadline:
         await asyncio.sleep(2)
-        response = await httpx_request_with_transient_retries(
-            client,
-            "POST",
-            query_url,
-            attempts=3,
-            retry_delay=0.8,
-            hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
-            timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-            headers=runninghub_api_headers(provider),
-            json={"taskId": task_id},
-        )
-        response.raise_for_status()
+        try:
+            response = await _poll_with_live_client_and_fallback(
+                client,
+                "POST",
+                query_url,
+                provider=provider,
+                attempts=3,
+                retry_delay=0.8,
+                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                headers=runninghub_api_headers(provider),
+                json={"taskId": task_id},
+            )
+            response.raise_for_status()
+            consecutive_poll_errors = 0
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.HTTPError as exc:
+            if is_live_client and consecutive_poll_errors < IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS:
+                consecutive_poll_errors += 1
+                LOG.warning(
+                    "runninghub_openapi_poll_transient_retry task_id=%s consecutive=%s/%s err=%s",
+                    task_id,
+                    consecutive_poll_errors,
+                    IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(min(2.0 * consecutive_poll_errors, max(0.0, deadline - time.monotonic())))
+                continue
+            raise
         raw = response.json()
         last_payload = raw
         status = runninghub_query_status(raw)
@@ -12436,7 +12843,7 @@ async def wait_for_runninghub_image_task(client, provider, task_id):
             return {"data": {"results": [runninghub_extract_image(raw)]}}
         except HTTPException:
             pass
-    raise HTTPException(status_code=504, detail=f"RunningHub 生图任务超时：{last_payload}")
+    raise HTTPException(status_code=504, detail=f"RunningHub 生图任务超时，task_id={task_id}：{last_payload}")
 
 RUNNINGHUB_ENTRY_MODEL_RE = re.compile(r"^(app|workflow):(.+)$")
 
@@ -12704,7 +13111,7 @@ async def generate_runninghub_entry_image(prompt, size, model, reference_images,
         if height and "height" in names:
             return height
         return None
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with shared_async_http_client(timeout=timeout, trust_env=provider_trust_env(provider)) as client:
         uploaded = []
         for ref in (reference_images or [])[:ONLINE_IMAGE_REFERENCE_MAX]:
             ref_url = ref.get("url") if isinstance(ref, dict) else ref
@@ -12757,7 +13164,13 @@ async def generate_runninghub_entry_image(prompt, size, model, reference_images,
             submit_url = runninghub_endpoint_url(provider, "/task/openapi/ai-app/run")
             body = {"apiKey": api_key, "webappId": entry_id, "nodeInfoList": node_info_list}
 
-        response = await client.post(submit_url, headers=runninghub_app_headers(True, use_wallet), json=body)
+        response = await post_with_safe_proxy_fallback(
+            client,
+            submit_url,
+            provider=provider,
+            headers=runninghub_app_headers(True, use_wallet),
+            json=body,
+        )
         raw = response.json()
         if not (isinstance(raw, dict) and raw.get("code") in (0, "0")):
             raise HTTPException(status_code=502, detail=(raw.get("msg") if isinstance(raw, dict) else "") or f"RunningHub 提交失败：{raw}")
@@ -12765,35 +13178,69 @@ async def generate_runninghub_entry_image(prompt, size, model, reference_images,
         if not task_id:
             raise HTTPException(status_code=502, detail=f"RunningHub 未返回 taskId：{raw}")
 
+        await report_canvas_task_progress(
+            stage="polling",
+            upstream_task_id=str(task_id),
+            provider_id=(provider or {}).get("id", "runninghub"),
+            model=model,
+        )
         query_url = runninghub_endpoint_url(provider, "/task/openapi/outputs")
         deadline = time.monotonic() + 1800
         last_payload = None
-        while time.monotonic() < deadline:
-            await asyncio.sleep(2.5)
-            query_response = await httpx_request_with_transient_retries(
-                client,
-                "POST",
-                query_url,
-                attempts=3,
-                retry_delay=0.8,
-                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
-                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-                headers=runninghub_app_headers(True, provider=provider),
-                json={"apiKey": api_key, "taskId": task_id},
-            )
-            query_raw = query_response.json()
-            last_payload = query_raw
-            code = query_raw.get("code") if isinstance(query_raw, dict) else None
-            if code in (0, "0"):
-                outputs = runninghub_extract_outputs(query_raw.get("data"))
-                for remote in outputs:
-                    if str(remote or "").startswith(("http://", "https://", "/output/", "/assets/")):
-                        return {"type": "url", "value": str(remote)}, query_raw
-                raise HTTPException(status_code=502, detail=f"RunningHub 任务无图片输出：{query_raw}")
-            if code in (805, "805"):
-                raise HTTPException(status_code=502, detail=f"RunningHub 任务失败：{runninghub_fail_reason(query_raw) or query_raw}")
-            # 804 运行中 / 813 排队中 / 其他状态继续轮询
-        raise HTTPException(status_code=504, detail=f"RunningHub 任务超时：{last_payload}")
+        consecutive_poll_errors = 0
+        is_live_client = _is_live_scoped_http_client(client)
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(2.5)
+                try:
+                    query_response = await _poll_with_live_client_and_fallback(
+                        client,
+                        "POST",
+                        query_url,
+                        provider=provider,
+                        attempts=3,
+                        retry_delay=0.8,
+                        hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                        timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                        headers=runninghub_app_headers(True, provider=provider),
+                        json={"apiKey": api_key, "taskId": task_id},
+                    )
+                    consecutive_poll_errors = 0
+                except httpx.HTTPStatusError:
+                    raise
+                except httpx.HTTPError as exc:
+                    if is_live_client and consecutive_poll_errors < IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS:
+                        consecutive_poll_errors += 1
+                        LOG.warning(
+                            "runninghub_entry_poll_transient_retry task_id=%s consecutive=%s/%s err=%s",
+                            task_id,
+                            consecutive_poll_errors,
+                            IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS,
+                            type(exc).__name__,
+                        )
+                        await asyncio.sleep(min(2.0 * consecutive_poll_errors, max(0.0, deadline - time.monotonic())))
+                        continue
+                    raise
+                query_raw = query_response.json()
+                last_payload = query_raw
+                code = query_raw.get("code") if isinstance(query_raw, dict) else None
+                if code in (0, "0"):
+                    outputs = runninghub_extract_outputs(query_raw.get("data"))
+                    for remote in outputs:
+                        if str(remote or "").startswith(("http://", "https://", "/output/", "/assets/")):
+                            return {"type": "url", "value": str(remote)}, query_raw
+                    raise HTTPException(status_code=502, detail=f"RunningHub 任务无图片输出：{query_raw}")
+                if code in (805, "805"):
+                    raise HTTPException(status_code=502, detail=f"RunningHub 任务失败：{runninghub_fail_reason(query_raw) or query_raw}")
+                # 804 运行中 / 813 排队中 / 其他状态继续轮询
+            raise HTTPException(status_code=504, detail=f"RunningHub 任务超时，task_id={task_id}：{last_payload}")
+        except HTTPException as exc:
+            setattr(exc, "upstream_task_id", str(task_id))
+            raise
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            error = HTTPException(status_code=502, detail=f"RunningHub 任务查询连接异常，task_id={task_id}；任务已受理未丢失，可稍后点击查询结果。")
+            setattr(error, "upstream_task_id", str(task_id))
+            raise error from exc
 
 async def generate_runninghub_provider_image(prompt, size, model, reference_images=None, provider=None):
     entry = runninghub_entry_config_from_model(provider, model)
@@ -12823,7 +13270,10 @@ async def generate_runninghub_provider_image(prompt, size, model, reference_imag
     quality_field = runninghub_schema_field(params, "quality")
     if quality_field:
         body["quality"] = runninghub_schema_value(quality_field, "medium")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=1800.0, write=180.0, pool=20.0)) as client:
+    async with shared_async_http_client(
+        timeout=httpx.Timeout(connect=20.0, read=1800.0, write=180.0, pool=20.0),
+        trust_env=provider_trust_env(provider),
+    ) as client:
         image_urls = []
         for ref in (reference_images or [])[:ONLINE_IMAGE_REFERENCE_MAX]:
             url = await runninghub_upload_reference(client, provider, ref)
@@ -12837,7 +13287,13 @@ async def generate_runninghub_provider_image(prompt, size, model, reference_imag
             else:
                 body[key] = image_urls[0]
         runninghub_apply_schema_defaults(body, params)
-        response = await client.post(endpoint, headers=runninghub_json_headers(provider), json=body)
+        response = await post_with_safe_proxy_fallback(
+            client,
+            endpoint,
+            provider=provider,
+            headers=runninghub_json_headers(provider),
+            json=body,
+        )
         response.raise_for_status()
         raw = response.json()
         try:
@@ -12846,8 +13302,22 @@ async def generate_runninghub_provider_image(prompt, size, model, reference_imag
             task_id = runninghub_extract_task_id(raw)
             if not task_id:
                 raise HTTPException(status_code=502, detail=f"RunningHub 未返回 taskId 或图片结果：{raw}")
-        result = await wait_for_runninghub_image_task(client, provider, task_id)
-        return runninghub_extract_image(result), result
+        await report_canvas_task_progress(
+            stage="polling",
+            upstream_task_id=str(task_id),
+            provider_id=(provider or {}).get("id", "runninghub"),
+            model=model,
+        )
+        try:
+            result = await wait_for_runninghub_image_task(client, provider, task_id)
+            return runninghub_extract_image(result), result
+        except HTTPException as exc:
+            setattr(exc, "upstream_task_id", str(task_id))
+            raise
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            error = HTTPException(status_code=502, detail=f"RunningHub 任务查询连接异常，task_id={task_id}；任务已受理未丢失，可稍后点击查询结果。")
+            setattr(error, "upstream_task_id", str(task_id))
+            raise error from exc
 
 async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind=""):
     query_url = runninghub_openapi_url(provider, "query")
@@ -13011,7 +13481,15 @@ async def generate_grsai_provider_image(prompt, size, model, reference_images=No
         body["imageSize"] = grsai_image_size(resolution, model_value, size)
     timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)
     async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=provider_trust_env(provider)) as client:
-        response = await client.post(generate_url, headers=api_headers(provider=provider, model=model_value), json=body)
+        response = await post_with_safe_proxy_fallback(
+            client,
+            generate_url,
+            provider=provider,
+            timeout=timeout,
+            follow_redirects=True,
+            headers=api_headers(provider=provider, model=model_value),
+            json=body,
+        )
         response.raise_for_status()
         raw = response.json()
         status = str(raw.get("status") or "").strip().lower() if isinstance(raw, dict) else ""
@@ -13023,32 +13501,66 @@ async def generate_grsai_provider_image(prompt, size, model, reference_images=No
             task_id = str(raw.get("id") or raw.get("task_id") or "").strip() if isinstance(raw, dict) else ""
             if not task_id:
                 raise
+        await report_canvas_task_progress(
+            stage="polling",
+            upstream_task_id=task_id,
+            provider_id=provider.get("id", "grsai"),
+            model=model_value,
+        )
         started = time.monotonic()
         deadline = started + 1800
-        while time.monotonic() < deadline:
-            step_sleep = 1.4 if (time.monotonic() - started) < 35.0 else 2.4
-            await asyncio.sleep(step_sleep)
-            poll = await httpx_request_with_transient_retries(
-                client,
-                "GET",
-                result_url,
-                attempts=3,
-                retry_delay=0.8,
-                hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
-                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
-                params={"id": task_id},
-                headers=api_headers(provider=provider, model=model_value),
-            )
-            poll.raise_for_status()
-            last = poll.json()
-            poll_status = str(last.get("status") or "").strip().lower() if isinstance(last, dict) else ""
-            if poll_status in {"failed", "failure", "violation", "error"}:
-                raise HTTPException(status_code=502, detail=f"Grsai 生图失败：{last.get('error') or last.get('message') or poll_status}")
-            try:
-                return extract_image(last), last
-            except HTTPException:
-                continue
-        raise HTTPException(status_code=504, detail=f"Grsai 生图任务超时，task_id={task_id}")
+        consecutive_poll_errors = 0
+        is_live_client = _is_live_scoped_http_client(client)
+        try:
+            while time.monotonic() < deadline:
+                step_sleep = 1.4 if (time.monotonic() - started) < 35.0 else 2.4
+                await asyncio.sleep(step_sleep)
+                try:
+                    poll = await _poll_with_live_client_and_fallback(
+                        client,
+                        "GET",
+                        result_url,
+                        provider=provider,
+                        attempts=3,
+                        retry_delay=0.8,
+                        hard_timeout=IMAGE_TASK_POLL_HARD_TIMEOUT,
+                        timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                        params={"id": task_id},
+                        headers=api_headers(provider=provider, model=model_value),
+                    )
+                    poll.raise_for_status()
+                    consecutive_poll_errors = 0
+                except httpx.HTTPStatusError:
+                    raise
+                except httpx.HTTPError as exc:
+                    if is_live_client and consecutive_poll_errors < IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS:
+                        consecutive_poll_errors += 1
+                        LOG.warning(
+                            "grsai_poll_transient_retry task_id=%s consecutive=%s/%s err=%s",
+                            task_id,
+                            consecutive_poll_errors,
+                            IMAGE_TASK_POLL_MAX_CONSECUTIVE_ERRORS,
+                            type(exc).__name__,
+                        )
+                        await asyncio.sleep(min(2.0 * consecutive_poll_errors, max(0.0, deadline - time.monotonic())))
+                        continue
+                    raise
+                last = poll.json()
+                poll_status = str(last.get("status") or "").strip().lower() if isinstance(last, dict) else ""
+                if poll_status in {"failed", "failure", "violation", "error"}:
+                    raise HTTPException(status_code=502, detail=f"Grsai 生图失败：{last.get('error') or last.get('message') or poll_status}")
+                try:
+                    return extract_image(last), last
+                except HTTPException:
+                    continue
+            raise HTTPException(status_code=504, detail=f"Grsai 生图任务超时，task_id={task_id}")
+        except HTTPException as exc:
+            setattr(exc, "upstream_task_id", task_id)
+            raise
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            error = HTTPException(status_code=502, detail=f"Grsai 任务查询连接异常，task_id={task_id}；任务已受理未丢失，可稍后点击查询结果。")
+            setattr(error, "upstream_task_id", task_id)
+            raise error from exc
 
 def chat_completions_output_image(raw):
     if not isinstance(raw, dict):
@@ -13100,8 +13612,11 @@ async def generate_chat_completions_provider_image(prompt, size, model, referenc
         messages = [{"role": "user", "content": prompt_text}]
     timeout = httpx.Timeout(connect=20.0, read=600.0, write=120.0, pool=20.0)
     async with shared_async_http_client(timeout=timeout, trust_env=provider_trust_env(provider)) as client:
-        response = await client.post(
+        response = await post_with_safe_proxy_fallback(
+            client,
             chat_url,
+            provider=provider,
+            timeout=timeout,
             headers=api_headers(provider=provider, model=model),
             json={"model": model, "messages": messages, "stream": False},
         )
@@ -13197,8 +13712,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             data = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 data["quality"] = quality
-            return await client.post(
+            return await post_with_safe_proxy_fallback(
+                client,
                 edit_url,
+                provider=provider,
+                timeout=request_timeout,
                 params={"async": "true"} if is_soonstudio else None,
                 headers=api_headers(json_body=False, provider=provider, model=model),
                 data=data,
@@ -13237,7 +13755,17 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                     )
             headers = api_headers(provider=provider, model=model)
             try:
-                response = await client.post(edit_url if image_refs else gen_url, params={"async": "true"}, headers=headers, json=body)
+                response = await post_with_safe_proxy_fallback(
+                    client,
+                    edit_url if image_refs else gen_url,
+                    provider=provider,
+                    timeout=request_timeout,
+                    params={"async": "true"},
+                    headers=headers,
+                    json=body,
+                )
+            except (httpx.ProxyError, httpx.ConnectError) as exc:
+                raise HTTPException(status_code=502, detail="SoonStudio 无法建立连接（请求未送达上游，可检查网络或代理后重试）。") from exc
             except httpx.HTTPError as exc:
                 raise HTTPException(status_code=502, detail="SoonStudio 提交连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。") from exc
         elif comfly_async:
@@ -13246,9 +13774,14 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 body["image"] = [reference_to_data_url(ref) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
             try:
                 # A failed submission may already be billed; only GET polling is retried.
-                response = await client.post(
-                    gen_url, params={"async": "true"},
-                    headers=api_headers(provider=provider, model=model), json=body,
+                response = await post_with_safe_proxy_fallback(
+                    client,
+                    gen_url,
+                    provider=provider,
+                    timeout=request_timeout,
+                    params={"async": "true"},
+                    headers=api_headers(provider=provider, model=model),
+                    json=body,
                 )
             except httpx.HTTPError as exc:
                 raise HTTPException(status_code=502, detail="Comfly 异步提交连接异常，无法确认上游是否已受理；未自动重复提交，请先检查供应商任务记录。") from exc
@@ -13279,8 +13812,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                         fh = open(local_path, "rb")
                         opened.append(fh)
                         files.append(("images", (os.path.basename(local_path), fh, content_type_for_path(local_path))))
-                    response = await client.post(
+                    response = await post_with_safe_proxy_fallback(
+                        client,
                         video_url,
+                        provider=provider,
+                        timeout=request_timeout,
                         headers=api_headers(json_body=False, provider=provider, model=model),
                         data=form_data,
                         files=files,
@@ -13291,14 +13827,30 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             else:
                 if refs_for_proxy:
                     body["images"] = [await openai_video_proxy_public_reference_url(ref) for ref in refs_for_proxy]
-                response = await httpx_request_with_transient_retries(
-                    client,
-                    "POST",
-                    video_url,
-                    attempts=2,
-                    headers=api_headers(provider=provider, model=model),
-                    json=body,
-                )
+                try:
+                    response = await httpx_request_with_transient_retries(
+                        client,
+                        "POST",
+                        video_url,
+                        attempts=2,
+                        headers=api_headers(provider=provider, model=model),
+                        json=body,
+                    )
+                except (httpx.ProxyError, httpx.ConnectError) as exc:
+                    if (
+                        _is_live_scoped_http_client(client)
+                        and bool(getattr(client, "_proxy_sig", ()))
+                        and provider_trust_env(provider)
+                        and (isinstance(exc, httpx.ProxyError) or _proxy_sig_targets_loopback(getattr(client, "_proxy_sig", ())))
+                    ):
+                        async with shared_async_http_client(timeout=request_timeout, trust_env=False) as direct_client:
+                            response = await direct_client.post(
+                                video_url,
+                                headers=api_headers(provider=provider, model=model),
+                                json=body,
+                            )
+                    else:
+                        raise
         elif image_request_mode == "openai-responses":
             tool = {"type": "image_generation"}
             tool["action"] = "edit" if image_refs else "generate"
@@ -13321,7 +13873,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "tool_choice": {"type": "image_generation"},
             }
             responses_url = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/responses")
-            response = await post_openai_responses(client, responses_url, api_headers(provider=provider, model=model), body)
+            response = await post_openai_responses(client, responses_url, api_headers(provider=provider, model=model), body, provider=provider)
         elif image_request_mode == "openai-json":
             # Agnes 等“OpenAI JSON 图片接口”统一走 /images/generations：
             # 不使用 /images/edits，不传顶层 response_format/n/quality；
@@ -13330,17 +13882,41 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if image_refs:
                 extra_body["image"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
-            response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
+            response = await post_with_safe_proxy_fallback(
+                client,
+                gen_url,
+                provider=provider,
+                timeout=request_timeout,
+                params={"async": "true"} if is_soonstudio else None,
+                headers=api_headers(provider=provider, model=model),
+                json=body,
+            )
         elif is_apimart:
             body = apimart_image_generation_payload(model, prompt, size, quality, image_refs, aspect_ratio, resolution)
-            response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
+            response = await post_with_safe_proxy_fallback(
+                client,
+                gen_url,
+                provider=provider,
+                timeout=request_timeout,
+                params={"async": "true"} if is_soonstudio else None,
+                headers=api_headers(provider=provider, model=model),
+                json=body,
+            )
         elif is_gpt_family and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt}
             if size:
                 body["size"] = size
             if quality:
                 body["quality"] = quality
-            response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
+            response = await post_with_safe_proxy_fallback(
+                client,
+                gen_url,
+                provider=provider,
+                timeout=request_timeout,
+                params={"async": "true"} if is_soonstudio else None,
+                headers=api_headers(provider=provider, model=model),
+                json=body,
+            )
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
         elif image_refs:
@@ -13350,6 +13926,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             opened = []
             edit_failed_status = None
             edit_failed_text = ""
+            edit_failed_exc = None
             try:
                 def _prepare_local_multipart(file_path: str, is_mask: bool = False):
                     with open(file_path, "rb") as fh_in:
@@ -13404,6 +13981,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 except httpx.HTTPError as e:
                     edit_failed_status = -1
                     edit_failed_text = str(e)
+                    edit_failed_exc = e
                     response = None
             finally:
                 for fh in opened:
@@ -13411,10 +13989,15 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             # 2) edits 失败 → 非 GPT-Image 系列可回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
             if response is None:
                 if is_soonstudio and edit_failed_status == -1:
+                    if isinstance(edit_failed_exc, (httpx.ProxyError, httpx.ConnectError)):
+                        raise HTTPException(
+                            status_code=502,
+                            detail="SoonStudio 无法建立连接（请求未送达上游，可检查网络或代理后重试）。",
+                        ) from edit_failed_exc
                     raise HTTPException(
                         status_code=502,
                         detail="SoonStudio 图片编辑连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。",
-                    )
+                    ) from edit_failed_exc
                 if is_gpt_family:
                     model_label = "GPT-Image-2" if is_gpt2 else "GPT-Image-1"
                     raise HTTPException(
@@ -13430,7 +14013,15 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 }
                 if quality:
                     body["quality"] = quality
-                response = await client.post(gen_url, params={"async": "true"} if is_soonstudio else None, headers=api_headers(provider=provider, model=model), json=body)
+                response = await post_with_safe_proxy_fallback(
+                    client,
+                    gen_url,
+                    provider=provider,
+                    timeout=request_timeout,
+                    params={"async": "true"} if is_soonstudio else None,
+                    headers=api_headers(provider=provider, model=model),
+                    json=body,
+                )
                 if response.status_code >= 400 and images_api_unsupported(response):
                     raise HTTPException(
                         status_code=502,
@@ -13440,8 +14031,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             body = {"model": model, "prompt": prompt, "size": size, "response_format": "url", "n": 1}
             if quality:
                 body["quality"] = quality
-            response = await client.post(
+            response = await post_with_safe_proxy_fallback(
+                client,
                 gen_url,
+                provider=provider,
+                timeout=request_timeout,
                 params={"async": "true"} if is_soonstudio else None,
                 headers=api_headers(provider=provider, model=model),
                 json=body,
@@ -13469,8 +14063,12 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 if comfly_async:
                     raise HTTPException(status_code=502, detail="Comfly 异步提交未返回可识别的任务 ID 或图片；未自动重复提交，请检查供应商任务记录。") from exc
                 raise
-        if comfly_async:
-            LOG.info("comfly_image_async_submitted provider=%s model=%s upstream_task_id=%s", provider.get("id"), model, task_id)
+        await report_canvas_task_progress(
+            stage="polling",
+            upstream_task_id=task_id,
+            provider_id=provider.get("id", ""),
+            model=model,
+        )
         try:
             if comfly_async:
                 task_result = await wait_for_image_task(client, task_id, provider, response_validator=validate_comfly_image_response)
@@ -13480,10 +14078,13 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
         except HTTPException as exc:
             setattr(exc, "upstream_task_id", task_id)
             raise
-        except httpx.HTTPError as exc:
-            if not comfly_async:
-                raise
-            error = HTTPException(status_code=502, detail=f"Comfly 任务查询连接异常，task_id={task_id}；未重新提交生图，可稍后查询此任务。")
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            if comfly_async:
+                detail = f"Comfly 任务查询连接异常，task_id={task_id}；未重新提交生图，可稍后查询此任务。"
+            else:
+                provider_label = provider.get("name") or provider.get("id") or "上游"
+                detail = f"{provider_label} 任务查询连接异常，task_id={task_id}；任务已受理未丢失，可稍后点击查询结果。"
+            error = HTTPException(status_code=502, detail=detail)
             setattr(error, "upstream_task_id", task_id)
             raise error from exc
 
@@ -13964,7 +14565,11 @@ async def iter_chat_agent_reply(payload, conversation, image_refs):
             failure = HTTPException(status_code=exc.response.status_code, detail=detail)
         elif isinstance(exc, httpx.HTTPError):
             log_net_error(f"对话生图 网络/TLS错误 model={model}", exc)
-            failure = HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}")
+            upstream_tid = getattr(exc, "upstream_task_id", "") or _current_canvas_upstream_task_id()
+            suffix = f"（task_id={upstream_tid}）" if upstream_tid else ""
+            failure = HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}{suffix}")
+            if upstream_tid:
+                setattr(failure, "upstream_task_id", upstream_tid)
         elif isinstance(exc, HTTPException):
             failure = exc
         else:
@@ -16431,6 +17036,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
         except HTTPException:
             image_items = [image_data]
+        await report_canvas_task_progress(stage="downloading", provider_id=provider["id"], model=model)
         local_urls = []
         local_items = []
         for image_index, item in enumerate(image_items):
@@ -16453,13 +17059,27 @@ async def build_online_image_result(payload: OnlineImageRequest):
         text = exc.response.text or ''
         friendly = friendly_image_error_detail(text, request_size, model)
         detail = friendly or f"上游生图接口错误：{text[:300]}"
-        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+        err = HTTPException(status_code=exc.response.status_code, detail=detail)
+        upstream_tid = getattr(exc, "upstream_task_id", "") or _current_canvas_upstream_task_id()
+        if upstream_tid:
+            setattr(err, "upstream_task_id", upstream_tid)
+        raise err from exc
     except ssl.SSLError as exc:
         log_net_error(f"生图 TLS错误 provider={provider.get('id')} model={model}", exc)
-        raise HTTPException(status_code=502, detail="上游 TLS 连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。") from exc
+        upstream_tid = getattr(exc, "upstream_task_id", "") or _current_canvas_upstream_task_id()
+        suffix = f"（task_id={upstream_tid}）" if upstream_tid else ""
+        err = HTTPException(status_code=502, detail=f"上游 TLS 连接中断，任务是否已受理无法确认；请先检查上游任务记录，避免直接重复提交。{suffix}")
+        if upstream_tid:
+            setattr(err, "upstream_task_id", upstream_tid)
+        raise err from exc
     except httpx.HTTPError as exc:
         log_net_error(f"生图 网络/TLS错误 provider={provider.get('id')} model={model}", exc)
-        raise HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}") from exc
+        upstream_tid = getattr(exc, "upstream_task_id", "") or _current_canvas_upstream_task_id()
+        suffix = f"（task_id={upstream_tid}）" if upstream_tid else ""
+        err = HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}{suffix}")
+        if upstream_tid:
+            setattr(err, "upstream_task_id", upstream_tid)
+        raise err from exc
 
     local_urls = [url for urls, _items, _raw in generated for url in (urls or []) if url]
     local_items = [item for _urls, items, _raw in generated for item in (items or []) if item.get("url")]
@@ -16778,43 +17398,210 @@ async def get_midjourney_task(task_id: str, provider_id: str):
     provider = apimart_midjourney_provider(provider_id)
     return await midjourney_result(provider, task_id)
 
+async def _finalize_recovered_image_query(
+    image_items: list,
+    *,
+    provider: dict,
+    task_id: str,
+    payload: ImageTaskQueryRequest,
+    raw: Any,
+    request_id: str = "",
+):
+    prompt_text = str(payload.prompt or "").strip()
+    canvas_id = str(payload.canvas_id or "").strip()
+    model_name = str(payload.model or "").strip()
+    project_name = generated_image_project_name(canvas_id) if (canvas_id or prompt_text) else ""
+    local_urls = []
+    local_items = []
+    for image_index, item in enumerate(image_items):
+        name_stem = generated_image_name_stem(project_name or "未命名项目", prompt_text, image_index + 1) if (canvas_id or prompt_text) else ""
+        local_url = await save_ai_image_to_output(item, prefix="online_", name_stem=name_stem)
+        if local_url:
+            local_urls.append(local_url)
+            meta = image_output_meta(local_url, item)
+            if name_stem:
+                extension = os.path.splitext(urllib.parse.urlparse(local_url).path)[1].lower()
+                if extension not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"):
+                    mime_type = str((item or {}).get("mime_type") or "").lower()
+                    extension = ".jpg" if "jpeg" in mime_type else ".webp" if "webp" in mime_type else ".png"
+                meta["name"] = name_stem + extension
+            local_items.append(meta)
+    result = {
+        "status": "succeeded",
+        "prompt": prompt_text,
+        "project_name": project_name,
+        "canvas_id": canvas_id,
+        "images": local_urls,
+        "image_items": local_items,
+        "timestamp": time.time(),
+        "type": "online",
+        "model": model_name,
+        "provider_id": provider["id"],
+        "provider_name": provider.get("name") or provider["id"],
+        "task_id": task_id,
+        "request_id": request_id or (raw.get("id") if isinstance(raw, dict) else ""),
+        "params": {"provider_id": provider["id"], "model": model_name},
+        "raw": raw,
+    }
+    save_to_history(result)
+    if GLOBAL_LOOP:
+        asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
+    return result
+
+
 @app.post("/api/image-task-query")
 async def query_image_task(payload: ImageTaskQueryRequest):
     provider = get_api_provider(payload.provider_id)
     task_id = str(payload.task_id or "").strip()
-    if is_runninghub_provider(provider):
-        api_key = runninghub_api_key(provider)
-        url = runninghub_endpoint_url(provider, "/task/openapi/outputs")
+    if provider["id"] == "modelscope":
+        clean_token = modelscope_api_key()
+        if not clean_token:
+            raise HTTPException(status_code=400, detail="未配置 ModelScope API Key，请在 API 设置中填写。")
+        api_root = modelscope_image_api_root()
+        headers = {
+            "Authorization": f"Bearer {clean_token}",
+            "Content-Type": "application/json",
+            "X-ModelScope-Task-Type": "image_generation",
+        }
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=240.0, write=30.0, pool=20.0)) as client:
-                response = await client.post(url, headers=runninghub_app_headers(True), json={"apiKey": api_key, "taskId": task_id})
+            async with shared_async_http_client(
+                timeout=IMAGE_TASK_POLL_REQUEST_TIMEOUT,
+                follow_redirects=True,
+                trust_env=provider_trust_env(provider),
+            ) as client:
+                response = await _poll_with_live_client_and_fallback(
+                    client,
+                    "GET",
+                    f"{api_root}/tasks/{urllib.parse.quote(task_id, safe='')}",
+                    provider=provider,
+                    headers=headers,
+                )
                 response.raise_for_status()
                 raw = response.json()
+        except httpx.HTTPStatusError as exc:
+            text = exc.response.text or ""
+            raise HTTPException(status_code=exc.response.status_code, detail=f"查询 ModelScope 任务失败：{text[:300]}") from exc
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            raise HTTPException(status_code=502, detail=f"查询 ModelScope 任务失败：{exc}") from exc
+        status = str(raw.get("task_status") or "").upper() if isinstance(raw, dict) else ""
+        if status == "SUCCEED":
+            urls = [u for u in (raw.get("output_images") or []) if u]
+            if not urls:
+                raise HTTPException(status_code=502, detail=f"ModelScope 成功但没有返回图片：{raw}")
+            items = [{"type": "url", "value": u} for u in urls]
+            return await _finalize_recovered_image_query(
+                items, provider=provider, task_id=task_id, payload=payload, raw=raw
+            )
+        if status in {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED", "TIMEOUT", "REVOKED"}:
+            detail = raw.get("error_info") or raw.get("message") or raw.get("detail") or str(raw)
+            return {
+                "status": "failed",
+                "task_id": task_id,
+                "provider_id": provider["id"],
+                "provider_name": provider.get("name") or provider["id"],
+                "error": f"ModelScope 任务失败：{detail}",
+                "raw": raw,
+            }
+        return {
+            "status": "running",
+            "task_id": task_id,
+            "provider_id": provider["id"],
+            "provider_name": provider.get("name") or provider["id"],
+            "message": "ModelScope 任务仍在生成中",
+            "raw": raw,
+        }
+
+    if is_runninghub_provider(provider):
+        is_openapi_model = bool(str(payload.model or "").strip()) and not runninghub_entry_config_from_model(provider, payload.model)
+        timeout = httpx.Timeout(connect=20.0, read=240.0, write=30.0, pool=20.0)
+        try:
+            async with shared_async_http_client(timeout=timeout, trust_env=provider_trust_env(provider)) as client:
+                if is_openapi_model:
+                    url = runninghub_openapi_url(provider, "query")
+                    response = await _poll_with_live_client_and_fallback(
+                        client,
+                        "POST",
+                        url,
+                        provider=provider,
+                        timeout=timeout,
+                        headers=runninghub_api_headers(provider),
+                        json={"taskId": task_id},
+                    )
+                else:
+                    api_key = runninghub_api_key(provider)
+                    url = runninghub_endpoint_url(provider, "/task/openapi/outputs")
+                    response = await _poll_with_live_client_and_fallback(
+                        client,
+                        "POST",
+                        url,
+                        provider=provider,
+                        timeout=timeout,
+                        headers=runninghub_app_headers(True, provider=provider),
+                        json={"apiKey": api_key, "taskId": task_id},
+                    )
+                response.raise_for_status()
+                raw = response.json()
+                if is_openapi_model:
+                    rh_status = runninghub_query_status(raw)
+                    if rh_status in {"success", "succeeded", "completed", "complete", "finished", "finish", "done", "3"}:
+                        try:
+                            img = runninghub_extract_image(raw)
+                            return await _finalize_recovered_image_query(
+                                [img], provider=provider, task_id=task_id, payload=payload, raw=raw
+                            )
+                        except HTTPException:
+                            pass
+                    if rh_status in {"failed", "fail", "error", "canceled", "cancelled", "4"}:
+                        return {
+                            "status": "failed",
+                            "task_id": task_id,
+                            "provider_id": provider["id"],
+                            "provider_name": provider.get("name") or provider["id"],
+                            "error": runninghub_fail_reason(raw) or "RunningHub 任务失败",
+                            "raw": raw,
+                        }
+                    return {
+                        "status": "running",
+                        "task_id": task_id,
+                        "provider_id": provider["id"],
+                        "provider_name": provider.get("name") or provider["id"],
+                        "message": "RunningHub 任务仍在生成中",
+                        "raw": raw,
+                    }
                 code = raw.get("code") if isinstance(raw, dict) else None
                 if code in (0, "0"):
                     local_urls = []
                     local_items = []
-                    for remote in runninghub_extract_outputs(raw.get("data")):
+                    prompt_text = str(payload.prompt or "").strip()
+                    canvas_id = str(payload.canvas_id or "").strip()
+                    project_name = generated_image_project_name(canvas_id) if (canvas_id or prompt_text) else ""
+                    for idx, remote in enumerate(runninghub_extract_outputs(raw.get("data"))):
                         try:
                             local_url = await runninghub_store_remote_output(client, remote)
                         except Exception:
                             local_url = rewrite_runninghub_file_url(remote)
                         if local_url:
                             local_urls.append(local_url)
-                            local_items.append(image_output_meta(local_url))
+                            meta = image_output_meta(local_url)
+                            if project_name or prompt_text:
+                                ext = os.path.splitext(urllib.parse.urlparse(local_url).path)[1].lower() or ".png"
+                                meta["name"] = generated_image_name_stem(project_name or "未命名项目", prompt_text, idx + 1) + ext
+                            local_items.append(meta)
                     result = {
                         "status": "succeeded",
-                        "prompt": "",
+                        "prompt": prompt_text,
+                        "project_name": project_name,
+                        "canvas_id": canvas_id,
                         "images": local_urls,
                         "image_items": local_items,
                         "timestamp": time.time(),
                         "type": "online",
-                        "model": "",
+                        "model": str(payload.model or ""),
                         "provider_id": provider["id"],
                         "provider_name": provider.get("name") or provider["id"],
                         "task_id": task_id,
                         "request_id": "",
-                        "params": {"provider_id": provider["id"]},
+                        "params": {"provider_id": provider["id"], "model": str(payload.model or "")},
                         "raw": raw,
                     }
                     save_to_history(result)
@@ -16841,8 +17628,65 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         except httpx.HTTPStatusError as exc:
             text = exc.response.text or ""
             raise HTTPException(status_code=exc.response.status_code, detail=f"查询 RunningHub 任务失败：{text[:300]}") from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ssl.SSLError) as exc:
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
+
+    if effective_image_request_mode(provider, payload.model) == "grsai":
+        base_url = (provider.get("base_url") or "").rstrip("/")
+        if not base_url:
+            raise HTTPException(status_code=400, detail="Grsai 未配置 Base URL")
+        result_url = f"{base_url}/v1/api/result"
+        timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
+        try:
+            async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=provider_trust_env(provider)) as client:
+                poll = await _poll_with_live_client_and_fallback(
+                    client,
+                    "GET",
+                    result_url,
+                    provider=provider,
+                    params={"id": task_id},
+                    headers=api_headers(provider=provider, model=payload.model),
+                )
+                poll.raise_for_status()
+                raw = poll.json()
+        except httpx.HTTPStatusError as exc:
+            log_net_error(f"查询 Grsai 任务 HTTP状态错误 provider={provider.get('id')} task_id={task_id}", exc)
+            text = exc.response.text or ""
+            raise HTTPException(status_code=exc.response.status_code, detail=f"查询上游生图任务失败：{text[:300]}") from exc
+        except (httpx.HTTPError, ssl.SSLError) as exc:
+            log_net_error(f"查询 Grsai 任务 网络/TLS错误 provider={provider.get('id')} task_id={task_id}", exc)
+            raise HTTPException(status_code=502, detail=f"查询上游生图任务失败：{exc}") from exc
+        poll_status = str(raw.get("status") or "").strip().lower() if isinstance(raw, dict) else ""
+        if poll_status in {"failed", "failure", "violation", "error"}:
+            return {
+                "status": "failed",
+                "task_id": task_id,
+                "provider_id": provider["id"],
+                "provider_name": provider.get("name") or provider["id"],
+                "error": f"Grsai 生图失败：{raw.get('error') or raw.get('message') or poll_status}",
+                "raw": raw,
+            }
+        image_items = []
+        try:
+            image_items = extract_images(raw)
+        except HTTPException:
+            try:
+                image_items = [extract_image(raw)]
+            except HTTPException:
+                image_items = []
+        if image_items:
+            return await _finalize_recovered_image_query(
+                image_items, provider=provider, task_id=task_id, payload=payload, raw=raw
+            )
+        return {
+            "status": "running",
+            "task_id": task_id,
+            "provider_id": provider["id"],
+            "provider_name": provider.get("name") or provider["id"],
+            "message": "任务仍在生成中",
+            "raw": raw,
+        }
+
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     try:
         async with shared_async_http_client(timeout=timeout, follow_redirects=True, trust_env=provider_trust_env(provider)) as client:
@@ -16851,7 +17695,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         log_net_error(f"查询生图任务 HTTP状态错误 provider={provider.get('id')} task_id={task_id}", exc)
         text = exc.response.text or ""
         raise HTTPException(status_code=exc.response.status_code, detail=f"查询上游生图任务失败：{text[:300]}") from exc
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ssl.SSLError) as exc:
         log_net_error(f"查询生图任务 网络/TLS错误 provider={provider.get('id')} task_id={task_id}", exc)
         raise HTTPException(status_code=502, detail=f"查询上游生图任务失败：{exc}") from exc
 
@@ -16862,32 +17706,9 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     except HTTPException:
         image_items = []
     if image_items:
-        local_urls = []
-        local_items = []
-        for item in image_items:
-            local_url = await save_ai_image_to_output(item, prefix="online_")
-            if local_url:
-                local_urls.append(local_url)
-                local_items.append(image_output_meta(local_url, item))
-        result = {
-            "status": "succeeded",
-            "prompt": "",
-            "images": local_urls,
-            "image_items": local_items,
-            "timestamp": time.time(),
-            "type": "online",
-            "model": "",
-            "provider_id": provider["id"],
-            "provider_name": provider.get("name") or provider["id"],
-            "task_id": task_id,
-            "request_id": raw.get("id") if isinstance(raw, dict) else "",
-            "params": {"provider_id": provider["id"]},
-            "raw": raw,
-        }
-        save_to_history(result)
-        if GLOBAL_LOOP:
-            asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
-        return result
+        return await _finalize_recovered_image_query(
+            image_items, provider=provider, task_id=task_id, payload=payload, raw=raw
+        )
     if status in IMAGE_TASK_FAILED_STATUSES:
         return {
             "status": "failed",
@@ -16917,15 +17738,22 @@ async def _notify_canvas_task_ws(task_id: str):
         pass
 
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
+    token = _ACTIVE_CANVAS_TASK_ID.set(task_id)
     with CANVAS_TASK_LOCK:
         if task_id in CANVAS_TASKS:
             CANVAS_TASKS[task_id]["status"] = "running"
+            CANVAS_TASKS[task_id]["stage"] = "submitting"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
+    await _notify_canvas_task_ws(task_id)
     try:
         result = await build_online_image_result(payload)
+        existing_upstream_task_id = _current_canvas_upstream_task_id(task_id)
+        final_upstream_task_id = existing_upstream_task_id or str((result or {}).get("task_id") or "").strip()
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
                 "status": "succeeded",
+                "stage": "succeeded",
+                "upstream_task_id": final_upstream_task_id,
                 "result": result,
                 "error": "",
                 "updated_at": time.time(),
@@ -16937,6 +17765,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
                 "status": "jimeng_pending",
+                "stage": "jimeng_pending",
                 "jimeng_pending": True,
                 "submit_id": exc.submit_id,
                 "kind": exc.kind,
@@ -16957,32 +17786,45 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
             status_code,
             str(detail)[:2000],
         )
-        upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
+        existing_upstream_task_id = _current_canvas_upstream_task_id(task_id)
+        upstream_task_id = (
+            str(getattr(exc, "upstream_task_id", "") or "").strip()
+            or existing_upstream_task_id
+            or extract_task_id_from_text(detail)
+        )
         with CANVAS_TASK_LOCK:
             CANVAS_TASKS[task_id].update({
                 "status": "failed",
+                "stage": "failed",
                 "error": str(detail),
                 "status_code": status_code,
                 "upstream_task_id": upstream_task_id,
                 "updated_at": time.time(),
             })
         await _notify_canvas_task_ws(task_id)
+    finally:
+        _ACTIVE_CANVAS_TASK_ID.reset(token)
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest, request: Request):
     populate_image_canvas_context(payload, request)
     task_id = f"canvas_img_{uuid.uuid4().hex}"
     with CANVAS_TASK_LOCK:
+        _prune_canvas_tasks_locked()
         CANVAS_TASKS[task_id] = {
             "id": task_id,
             "type": "online-image",
             "status": "queued",
+            "stage": "queued",
+            "upstream_task_id": "",
             "created_at": time.time(),
             "updated_at": time.time(),
             "result": None,
             "error": "",
             "provider_id": payload.provider_id,
             "model": payload.model,
+            "prompt": str(payload.prompt or "")[:240],
+            "canvas_id": str(payload.canvas_id or ""),
         }
     asyncio.create_task(run_canvas_image_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
@@ -21168,7 +22010,12 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
             raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
         except httpx.HTTPError as exc:
             log_net_error(f"对话生图 网络/TLS错误 model={model}", exc)
-            raise HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}") from exc
+            upstream_tid = getattr(exc, "upstream_task_id", "") or _current_canvas_upstream_task_id()
+            suffix = f"（task_id={upstream_tid}）" if upstream_tid else ""
+            err = HTTPException(status_code=502, detail=f"请求上游生图接口失败：{exc}{suffix}")
+            if upstream_tid:
+                setattr(err, "upstream_task_id", upstream_tid)
+            raise err from exc
         assistant_message = {
             "id": uuid.uuid4().hex,
             "role": "assistant",
